@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=CachyOS Update Planner
+GenericName=Update-Planer
+Comment=Updates für Repo, AUR und Flatpak planen und bewerten
+Exec=@EXEC@
+Icon=update-planner
+Terminal=false
+Categories=System;PackageManager;
+Keywords=update;pacman;aur;flatpak;cachyos;
+StartupWMClass=update-planner
