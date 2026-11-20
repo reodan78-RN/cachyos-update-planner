@@ -172,6 +172,72 @@ def last_upgrade(log: Path = Path('/var/log/pacman.log')) -> str | None:
         return None
 
 
+HISTORY_RE = re.compile(rb'^\[(\d{4}-\d{2}-\d{2})T[^\]]*\] \[ALPM\] (upgraded|installed|removed|downgraded) ')
+
+
+def history(days: int = 60, log: Path = Path('/var/log/pacman.log'), max_bytes: int = 16 * 1024 * 1024) -> list[dict]:
+    """Paketänderungen pro Tag der letzten `days` Tage: [{date, upgraded, installed, removed}], lückenlos."""
+    from datetime import date, timedelta
+    end = date.today()
+    start = end - timedelta(days=days - 1)
+    counts: dict[str, dict[str, int]] = {}
+    try:
+        with log.open('rb') as f:
+            size = f.seek(0, 2)
+            f.seek(max(0, size - max_bytes))
+            data = f.read()
+    except OSError:
+        data = b''
+    first = start.isoformat().encode()
+    for line in data.split(b'\n'):
+        m = HISTORY_RE.match(line)
+        if not m or m.group(1) < first:
+            continue
+        kind = {b'downgraded': 'upgraded'}.get(m.group(2), m.group(2).decode())
+        counts.setdefault(m.group(1).decode(), {}).setdefault(kind, 0)
+        counts[m.group(1).decode()][kind] += 1
+    out = []
+    for i in range(days):
+        d = (start + timedelta(days=i)).isoformat()
+        c = counts.get(d, {})
+        out.append(dict(date=d, upgraded=c.get('upgraded', 0), installed=c.get('installed', 0), removed=c.get('removed', 0)))
+    return out
+
+
+CACHE_DIR = Path('/var/cache/pacman/pkg')
+PACCACHE_RE = re.compile(r'finished dry run: (\d+) candidates \(disk space saved: ([\d.]+) (B|KiB|MiB|GiB|TiB)\)')
+
+
+def orphans() -> list[str]:
+    """Verwaiste Pakete: als Abhängigkeit installiert, aber von keinem Paket mehr benötigt (pacman -Qdtq)."""
+    out = run(['pacman', '-Qdtq'], timeout=60, ok_codes=(0, 1))   # 1 = keine Waisen
+    return [valid_name(n) for n in out.split()]
+
+
+def cache_info(keep: int = 2) -> dict:
+    """Größe des Paket-Caches und was `paccache -rk<keep>` plus `-ruk0` freigeben würde (nur Probelauf)."""
+    size = 0
+    try:
+        with __import__('os').scandir(CACHE_DIR) as it:
+            for e in it:
+                if e.is_file(follow_symlinks=False):
+                    size += e.stat(follow_symlinks=False).st_size
+    except OSError:
+        pass
+    count, saved = 0, 0.0
+    for args in (['-dk', str(int(keep))], ['-duk0']):
+        try:
+            out = run(['paccache', *args], timeout=180, ok_codes=(0, 1))
+        except (CommandError, OSError):
+            continue
+        m = PACCACHE_RE.search(out)
+        if m:
+            count += int(m.group(1))
+            saved += float(m.group(2)) * {'B': 1 / 1024 ** 3, 'KiB': 1 / 1024 ** 2, 'MiB': 1 / 1024,
+                                          'GiB': 1, 'TiB': 1024}[m.group(3)]
+    return dict(size_gib=size / 1024 ** 3, candidates=count, saved_gib=saved, keep=int(keep))
+
+
 def pacnew_files() -> list[str]:
     """Offene .pacnew-Dateien unter /etc (unlesbare Verzeichnisse werden übersprungen)."""
     found = []

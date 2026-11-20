@@ -47,6 +47,9 @@ class Plan:
     snapshot: bool = True
     dry_run: bool = False
     reviewed: set[str] = field(default_factory=set)    # trotz Scanner-Warnung freigegeben
+    remove_orphans: bool = False                      # nach dem Update verwaiste Pakete anbieten (Rückfrage)
+    clean_cache: bool = False                         # Paket-Cache mit paccache aufräumen
+    cache_keep: int = 2                               # so viele Versionen je Paket behalten
 
     def phases(self) -> list[str]:
         p = ['Vorbereitung']
@@ -58,6 +61,8 @@ class Plan:
             p.append('AUR')
         if self.flatpak:
             p.append('Flatpak')
+        if self.remove_orphans or self.clean_cache:
+            p.append('Aufräumen')
         p.append('Abschluss')
         return p
 
@@ -77,6 +82,8 @@ class Result:
     skipped: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     pacnew: list[str] = field(default_factory=list)
+    removed: list[str] = field(default_factory=list)     # entfernte verwaiste Pakete
+    cache_cleaned: bool = False
     reboot: bool = False
     snapshot: str | None = None
     log_file: str | None = None
@@ -213,6 +220,8 @@ class Runner:
             await self._aur()
         if self.plan.flatpak:
             await self._flatpak()
+        if 'Aufräumen' in self._phases:
+            await self._cleanup()
         await self._finish()
 
     async def _prepare(self) -> None:
@@ -378,6 +387,49 @@ class Runner:
                 self.result.errors.append(_('flatpak update beendet mit {rc}', rc=rc))
         self.result.updated.append('Flatpak')
         self._progress(1.0)
+
+    async def _cleanup(self) -> None:
+        """Verwaiste Pakete (nur nach Rückfrage mit Liste) und Paket-Cache. Fehler hier brechen nichts ab."""
+        self._enter('Aufräumen')
+        total = int(self.plan.remove_orphans) + int(self.plan.clean_cache)
+        done = 0
+        if self.plan.remove_orphans:
+            orphans = await asyncio.to_thread(pacman_src.orphans)   # nach dem Update neu ermitteln
+            if not orphans:
+                self._log(_(':: Keine verwaisten Pakete'))
+            elif self.plan.dry_run:
+                self._log(_(':: Probelauf: {n} verwaiste Pakete würden zur Auswahl gestellt: {pkgs}',
+                            n=len(orphans), pkgs=', '.join(orphans)))
+            else:
+                listing = ', '.join(orphans[:25]) + (' …' if len(orphans) > 25 else '')
+                if await self.cb.ask(_('{n} verwaiste Pakete entfernen?', n=len(orphans)),
+                                     _('Diese Pakete wurden als Abhängigkeit installiert und werden von keinem Paket '
+                                       'mehr benötigt: {pkgs}. Sie werden mit pacman -Rns samt Konfigurationsdateien '
+                                       'entfernt.', pkgs=listing),
+                                     _('Entfernen'), _('Behalten')):
+                    rc = await self._stream(['pacman', '-Rns', '--noconfirm', '--noprogressbar', *orphans], sudo=True)
+                    if rc == 0:
+                        self.result.removed = orphans
+                    else:
+                        self.result.errors.append(_('Verwaiste Pakete nicht entfernt (pacman {rc})', rc=rc))
+                else:
+                    self._log(_(':: Verwaiste Pakete behalten'))
+            done += 1
+            self._progress(done / total)
+        if self.plan.clean_cache:
+            keep = str(max(0, min(int(self.plan.cache_keep), 9)))
+            if self.plan.dry_run:
+                rcs = [await self._stream(['paccache', '-dk', keep]), await self._stream(['paccache', '-duk0'])]
+            else:
+                # alte Versionen installierter Pakete, dann alle Versionen deinstallierter Pakete
+                rcs = [await self._stream(['paccache', '-rk', keep], sudo=True),
+                       await self._stream(['paccache', '-ruk0'], sudo=True)]
+            if any(rcs):
+                self.result.errors.append(_('Paket-Cache nicht vollständig aufgeräumt (paccache {rc})', rc=max(rcs)))
+            else:
+                self.result.cache_cleaned = not self.plan.dry_run
+            done += 1
+            self._progress(done / total)
 
     async def _finish(self) -> None:
         self._enter('Abschluss')

@@ -17,6 +17,7 @@ The window behaves like any other program: it opens on the **virtual desktop you
 | `base-devel` | building AUR packages (`makepkg`) | for AUR |
 | `flatpak` | Flatpak updates | optional |
 | `snapper`, `snap-pac` | Btrfs snapshots before updates | recommended |
+| `ttf-fira-sans` | the dashboard typeface (Noto Sans is used otherwise) | recommended |
 
 ```bash
 sudo pacman -S --needed pacman-contrib expac git python-gobject webkit2gtk-4.1 base-devel

@@ -46,20 +46,24 @@ def build_plan(state: State, opts: dict) -> tuple[executor.Plan, list[str]]:
              if opts['aur'] and u['name'] in sel and u['risk'] < opts['hold']],
         flatpak=[u['name'] for u in fp if opts['flatpak'] and u['name'] in sel and u['risk'] < opts['hold']],
         snapshot=opts['snapshot'], dry_run=opts['dry_run'], reviewed=set(state.reviewed),
+        remove_orphans=opts.get('orphans', False), clean_cache=opts.get('cache', False),
+        cache_keep=int(opts.get('cache_keep', 2)),
     )
     return plan, notes
 
 
 async def context_dialog(state: State) -> dict | None:
     updates = state.selected_updates()
-    if not updates:
+    sysinfo = md.SYSTEM
+    orphans = sysinfo.get('orphans') or []
+    cache = sysinfo.get('cache') or {}
+    if not updates and not orphans and not cache.get('candidates'):
         ui.notify(_('Keine Updates ausgewählt'), type='warning')
         return None
     size = sum(u['size'] for u in updates)
-    top = max(updates, key=lambda u: u['risk'])
+    top = max(updates, key=lambda u: u['risk']) if updates else {'name': '–', 'risk': 0}
     level, color = md.risk_level(top['risk'])
     reboot = any(config.matches(u['name'], config.REBOOT) for u in updates if u['source'] == 'repo')
-    sysinfo = md.SYSTEM
 
     dialog, card = _dialog_card()
     with card:
@@ -68,11 +72,12 @@ async def context_dialog(state: State) -> dict | None:
             ui.label(_('Update planen')).classes('text-xl font-semibold')
         with ui.grid(columns=3).classes('w-full gap-3 my-3'):
             for value, label in [(len(updates), _('Pakete')), (f'{size:.0f} MiB', _('Download')), (top['risk'], _('max. Risiko'))]:
-                with ui.column().classes('glass p-3 items-center gap-0').style('border-radius:14px'):
+                with ui.column().classes('glass p-3 items-center gap-0'):
                     ui.label(str(value)).classes('text-lg font-bold')
                     ui.label(label).classes('muted text-xs')
         with ui.row().classes('items-center gap-2'):
-            ui.badge(_('Höchstes Risiko: {pkg} ({level})', pkg=top['name'], level=_(level)), color=color)
+            if updates:
+                ui.badge(_('Höchstes Risiko: {pkg} ({level})', pkg=top['name'], level=_(level)), color=color)
             if reboot:
                 ui.badge(_('Neustart nötig'), color='secondary')
         flagged = [u['name'] for u in updates
@@ -80,8 +85,7 @@ async def context_dialog(state: State) -> dict | None:
         manual = [n for n in md.NEWS if n['manual'] and n.get('new')]
         for icon, text, link in ([('gpp_bad', _('AUR-Scanner meldet verdächtige Pakete: {pkgs}', pkgs=', '.join(flagged)), '/aur-scan')] if flagged else []) + \
                 [('front_hand', _('News mit manuellem Eingriff: {title}', title=n['title']), n['link']) for n in manual]:
-            with ui.row().classes('w-full items-start gap-2 mt-3 p-3 no-wrap') \
-                    .style('background:rgba(239,68,68,.10);border-radius:12px'):
+            with ui.row().classes('notice w-full items-start gap-2 mt-3 no-wrap').style('border-left-color:#dc4e41'):
                 ui.icon(icon, color='negative')
                 with ui.column().classes('gap-0'):
                     ui.label(text).classes('text-sm font-medium')
@@ -103,11 +107,27 @@ async def context_dialog(state: State) -> dict | None:
             hold = ui.slider(min=30, max=100, step=5, value=100).classes('flex-1').props('label-always')
         ui.label(_('Zurückgehaltene Repo-Pakete werden per --ignore ausgelassen. Teil-Updates unterstützt Arch nicht – '
                    'nur kurzfristig nutzen.')).classes('muted text-xs mt-1')
+        ui.separator().classes('my-3')
+        ui.label(_('Aufräumen nach dem Update')).classes('panel-title')
+        orphan_sw = ui.switch(_('Verwaiste Pakete entfernen – vorher wird die Liste zur Bestätigung angezeigt'),
+                              value=False)
+        ui.label(_('Derzeit {n} verwaiste Pakete', n=len(orphans)) + (f': {", ".join(orphans[:6])}' + (' …' if len(orphans) > 6 else '')
+                 if orphans else _('. Nach dem Update wird erneut geprüft.'))).classes('muted text-xs -mt-1 ml-10')
+        with ui.row().classes('items-center gap-3 no-wrap'):
+            cache_sw = ui.switch(_('Paket-Cache aufräumen'), value=False)
+            keep = ui.select({1: _('1 Version behalten'), 2: _('2 Versionen behalten'), 3: _('3 Versionen behalten')},
+                             value=2).props('dense outlined options-dense').classes('w-48')
+            keep.bind_enabled_from(cache_sw, 'value')
+        ui.label(_('Cache {size} GiB; mit 2 Versionen frei werden ca. {saved} GiB ({n} Dateien). '
+                   'Pakete, die nicht mehr installiert sind, werden ganz entfernt.',
+                   size=f'{cache.get("size_gib", 0):.1f}', saved=f'{cache.get("saved_gib", 0):.1f}',
+                   n=cache.get('candidates', 0))).classes('muted text-xs -mt-1 ml-10')
         with ui.row().classes('w-full justify-end gap-2 mt-4'):
             ui.button(_('Abbrechen'), on_click=lambda: dialog.submit(None)).props('flat')
             ui.button(_('Weiter'), icon='arrow_forward', on_click=lambda: dialog.submit({
                 'snapshot': snapshot.value, 'aur': aur.value, 'flatpak': flatpak.value, 'hold': hold.value,
                 'dry_run': dry.value, 'sync': False,
+                'orphans': orphan_sw.value, 'cache': cache_sw.value, 'cache_keep': keep.value,
             })).props('unelevated')
     result = await dialog
     dialog.delete()
@@ -185,11 +205,11 @@ async def progress_dialog(plan: executor.Plan, password: str | None, notes: list
             spinner = ui.spinner(size='26px')
             title = ui.label(_('Probelauf …') if plan.dry_run else _('Update läuft …')).classes('text-xl font-semibold')
         ui.label(_('Gesamt')).classes('muted text-xs mt-2')
-        total = ui.linear_progress(0, size='14px', show_value=False).props('rounded instant-feedback')
+        total = ui.linear_progress(0, size='14px', show_value=False).props('instant-feedback')
         with ui.row().classes('w-full justify-between'):
             phase_label = ui.label('').classes('text-sm font-medium')
             pct = ui.label('0 %').classes('text-sm muted')
-        phase_bar = ui.linear_progress(0, size='8px', show_value=False, color='secondary').props('rounded')
+        phase_bar = ui.linear_progress(0, size='8px', show_value=False, color='secondary')
         with ui.row().classes('gap-2 mt-2'):
             chips = {p: ui.chip(_(p), icon='radio_button_unchecked', color='grey-5').props('dense outline') for p in phases}
         log = ui.log(max_lines=2000).classes('log-box w-full mt-3')
@@ -235,6 +255,10 @@ async def progress_dialog(plan: executor.Plan, password: str | None, notes: list
         with ui.column().classes('gap-0'):
             if result.pacnew:
                 ui.label(_('{n} neue .pacnew-Dateien – mit pacdiff zusammenführen', n=len(result.pacnew))).classes('text-sm text-warning')
+            if result.removed:
+                ui.label(_('{n} verwaiste Pakete entfernt', n=len(result.removed))).classes('text-sm')
+            if result.cache_cleaned:
+                ui.label(_('Paket-Cache aufgeräumt')).classes('text-sm')
             if result.reboot:
                 ui.label(_('Neustart erforderlich (Kernel ersetzt)')).classes('text-sm text-negative font-medium')
             ui.label(_('Protokoll: {path}', path=result.log_file)).classes('muted text-xs')
@@ -254,11 +278,12 @@ async def start_update(state: State) -> None:
     if not opts:
         return
     plan, notes = build_plan(state, opts)
-    if not (plan.repo or plan.aur or plan.flatpak):
+    if not (plan.repo or plan.aur or plan.flatpak or plan.remove_orphans or plan.clean_cache):
         ui.notify(_('Nach Filter und Risikogrenze bleibt nichts zu tun'), type='warning')
         return
     password = None
-    needs_root = plan.repo or plan.aur or (plan.snapshot and not md.SYSTEM.get('snap_pac'))
+    needs_root = plan.repo or plan.aur or plan.remove_orphans or plan.clean_cache \
+        or (plan.snapshot and not md.SYSTEM.get('snap_pac'))
     if needs_root and not plan.dry_run:
         password = await password_dialog()
         if not password:

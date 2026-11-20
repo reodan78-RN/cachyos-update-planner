@@ -8,6 +8,7 @@ import multiprocessing
 import signal
 import sys
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 
 from nicegui import app, background_tasks, ui
@@ -38,79 +39,59 @@ THEME_TIP = {None: 'Design: System', True: 'Design: Dunkel', False: 'Design: Hel
 def root() -> None:
     theme.apply()
     s = st.get()
-    dark = ui.dark_mode(app.storage.user.get('dark'))
-    nav_buttons: dict[str, ui.button] = {}
+    dark = ui.dark_mode(app.storage.user.get('dark', True))
+    nav_items: dict[str, ui.element] = {}
 
-    # ---------- schwebende Kopfzeile ----------
-    with ui.header().classes('px-4 pt-3 pb-0'):
-        with ui.row().classes('glass w-full items-center px-4 py-2 gap-3 no-wrap'):
-            ui.button(icon='menu', on_click=lambda: drawer.toggle()).props('flat round dense').classes('lg:hidden')
-            ui.image(ICON).classes('w-10 h-10 shrink-0').props('no-spinner no-transition')
-            with ui.column().classes('gap-0'):
-                ui.label('CachyOS Update Planner').classes('font-bold text-base leading-tight') \
-                    .style('color:var(--text)')
-                ui.label('Repo · AUR · Flatpak').classes('muted text-xs leading-tight')
+    # ---------- Systemleiste + App-Navigation (wie Splunk: zwei dunkle Leisten) ----------
+    with ui.header().classes('p-0 gap-0').style('flex-direction:column;align-items:stretch;flex-wrap:nowrap'):
+        with ui.row().classes('sysbar w-full items-center gap-3 no-wrap'):
+            ui.image(ICON).classes('w-7 h-7 shrink-0').props('no-spinner no-transition')
+            ui.label('CachyOS Update Planner').classes('app-name')
             ui.space()
-            with ui.row().classes('gap-1 max-sm:hidden'):
-                for key, src in md.SOURCES.items():
-                    def toggle(e, key=key):
-                        s.sources.symmetric_difference_update({key})
-                        if not s.sources:  # mindestens eine Quelle aktiv lassen
-                            s.sources.add(key)
-                            e.sender.selected = True
-                        s.changed()
-                    ui.chip(src['label'], icon=src['icon'], selectable=True, selected=True,
-                            on_selection_change=toggle).props('outline').classes('chip-src') \
-                        .style(f'color:{src["color"]}')
+            labels = {k: v['label'] for k, v in md.SOURCES.items()}
+
+            def set_sources(e) -> None:
+                chosen = set(e.value or [])
+                if not chosen:                     # mindestens eine Quelle aktiv lassen
+                    chosen = set(s.sources)
+                    e.sender.value = sorted(chosen)
+                s.sources = chosen
+                s.changed()
+            src = ui.select(labels, multiple=True, value=sorted(s.sources), on_change=set_sources) \
+                .props('dense borderless options-dense dark').classes('src-select w-64 max-sm:hidden')
+            src.props(f'prefix="{_("Quellen")}:"')
+
+            checked = ui.label('').classes('meta max-sm:hidden')
 
             def check() -> None:
                 if md.STATUS['state'] == 'loading':
                     return
                 ui.notify(_('Prüfe Repos, AUR, Flathub und Sicherheitsdatenbank …'), position='top-right')
                 background_tasks.create(md.refresh(), name='manual-refresh')
-            sync_btn = ui.button(icon='sync', on_click=check).props('flat round').classes('text-primary') \
-                .tooltip(_('Nach Updates suchen'))
+            sync_btn = ui.button(icon='refresh', on_click=check).props('flat dense').tooltip(_('Nach Updates suchen'))
 
             def cycle_theme() -> None:
                 dark.value = THEME_CYCLE[dark.value]
                 app.storage.user['dark'] = dark.value
                 theme_btn.props(f'icon={THEME_ICON[dark.value]}')
                 theme_tip.text = _(THEME_TIP[dark.value])
-            theme_btn = ui.button(icon=THEME_ICON[dark.value], on_click=cycle_theme).props('flat round') \
-                .style('color:var(--text)')
+            theme_btn = ui.button(icon=THEME_ICON[dark.value], on_click=cycle_theme).props('flat dense')
             with theme_btn:
                 theme_tip = ui.tooltip(_(THEME_TIP[dark.value]))
+            ui.label(f'v{__version__}' + (' Demo' if md.STATUS.get('demo') else '')).classes('meta')
 
-    # ---------- Navigation + Systempanel ----------
-    with ui.left_drawer(value=None, fixed=True).props('width=230 breakpoint=1024').classes('p-4 pt-6') as drawer:
-        with ui.column().classes('glass w-full p-2 gap-1'):
-            for path, label, icon, _fn in NAV:
-                nav_buttons[path] = ui.button(_(label), icon=icon, on_click=lambda p=path: ui.navigate.to(p)) \
-                    .props('flat no-caps align=left').classes('nav-btn').style('color:var(--text)')
-
-        @ui.refreshable
-        def system_panel() -> None:
-            info = md.SYSTEM
-            with ui.column().classes('glass w-full p-4 gap-1 mt-4'):
-                ui.label('System').classes('muted text-xs')
-                if not info:
-                    ui.label(md.STATUS['step'] or _('wird geladen …')).classes('text-sm muted')
-                    return
-                ui.label(f'{info.get("os", "Linux")} · Kernel {info.get("kernel", "?")}').classes('text-sm')
-                snap = 'snap-pac' if info.get('snap_pac') else 'Snapper' if info.get('snapper') else _('keine Snapshots')
-                ui.label(f'{info.get("fs", "?")} · {snap}').classes('text-sm')
-                ui.label(_('Letztes Update: {when}', when=md.last_upgrade_text())).classes('text-sm')
-                ui.label(_('Frei: {gib} GiB', gib=f'{info.get("free_gib", 0):.0f}')).classes('text-sm')
-                if info.get('reboot_pending'):
-                    ui.badge(_('Neustart ausstehend'), color='negative').props('rounded')
-            ui.label(f'v{__version__}' + (' · Demo' if md.STATUS.get('demo') else '')).classes('muted text-xs mt-2 self-center')
-        system_panel()
+        with ui.row().classes('appnav w-full items-center gap-0 no-wrap overflow-x-auto'):
+            for path, label, _icon, _fn in NAV:
+                item = ui.label(_(label)).classes('nav-item').props('tabindex=0 role=link')
+                item.on('click', lambda p=path: ui.navigate.to(p))
+                item.on('keydown.enter', lambda p=path: ui.navigate.to(p))
+                nav_items[path] = item
 
     def wrap(path: str, builder: Callable[[], None]) -> Callable[[], None]:
         def build() -> None:
-            for p, b in nav_buttons.items():
-                b.classes(add='nav-active') if p == path else b.classes(remove='nav-active')
-            with ui.column().classes('w-full max-w-[1400px] mx-auto gap-5 p-2'):
+            for p, item in nav_items.items():
+                item.classes(add='active') if p == path else item.classes(remove='active')
+            with ui.column().classes('w-full max-w-[1500px] mx-auto gap-3 px-4 pt-4 pb-8'):
                 builder()
         return build
 
@@ -125,10 +106,12 @@ def root() -> None:
             sync_btn.props('loading')
         else:
             sync_btn.props(remove='loading')
+        loaded = md.STATUS.get('loaded_at')
+        checked.text = (md.STATUS['step'] if loading else
+                        _('Geprüft {time}', time=datetime.fromtimestamp(loaded).strftime('%H:%M')) if loaded else '')
         changed = s.sync_catalog()
         if changed or md.STATUS['state'] != seen['state'] or (not md.VERSION and md.STATUS['step'] != seen['step']):
             seen.update(state=md.STATUS['state'], step=md.STATUS['step'])
-            system_panel.refresh()
             if not s.busy:
                 s.changed()
     ui.timer(0.7, poll)

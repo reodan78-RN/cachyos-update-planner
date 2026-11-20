@@ -2,19 +2,28 @@
 
 ## Layout
 
-- **Header:** source filter chips (Repo, AUR, Flatpak), *Check for updates*, and the theme switch
-  (system → dark → light).
-- **Left side:** navigation and a system panel (distribution, kernel, file system, snapshot tool, last system
-  update, free space, pending reboot).
+The planner is laid out like a monitoring dashboard:
 
-The planner loads the system state in the background when it starts; the pages show a loading card until it is
+- **System bar** (top, dark): logo, the source filter (Repo, AUR, Flatpak), the time of the last check,
+  *Check for updates* and the theme switch (dark → light → system). Dark is the default.
+- **App navigation** (below): Overview, Packages, Updates, Conflicts, Security, AUR Scanner.
+- **Dashboards:** each page starts with a title and a short description, followed by single values, charts,
+  tables and flat panels. Colors carry meaning only: green, yellow, orange and red follow thresholds and severities.
+
+The planner loads the system state in the background when it starts; the pages show a loading panel until it is
 ready. *Check for updates* reloads everything.
 
 ## Overview
 
-Key figures (installed packages, pending updates and download size, average risk, vulnerabilities), the six
-riskiest updates and the latest Arch and CachyOS news. News that require manual intervention and were published
-after your last full system update are highlighted.
+- **Single values:** installed packages, pending updates with download size, the highest risk score, known
+  vulnerabilities (how many are high or critical) and the time since the last full system update. Each value is
+  colored by threshold.
+- **Package changes per day:** upgraded, installed and removed packages over the last 60 days, read from
+  `/var/log/pacman.log`.
+- **Risk of pending updates:** how many updates are low, medium or high risk.
+- **Riskiest updates**, a **system** panel (distribution, kernel, file system, snapshots, free space, unmerged
+  `.pacnew` files, pending reboot) and the latest **Arch and CachyOS news**; announcements that require manual
+  intervention are marked.
 
 ## Packages
 
@@ -22,9 +31,14 @@ All installed packages with origin, version and number of dependencies. Click a 
 graph (two levels down plus the packages that depend on it, trimmed for large trees). Orange rings mark packages
 with an update, red rings packages involved in a potential incompatibility. Mouse wheel zooms, dragging moves nodes.
 
+The **Security** column marks every package listed in the Arch Linux Security Tracker with its highest severity
+(critical, high, medium, low), plus the number of entries when there is more than one. Sort by this column or tick
+*Affected only*. In the graph, affected packages get a solid ring in the severity color; a dashed red ring marks a
+potential incompatibility and a dotted green ring an available update.
+
 ## Updates
 
-All pending updates with old → new version, size and risk score. Hover over the risk bar to see how the score
+All pending updates with old → new version, size and risk score. Point at the colored risk value to see how the score
 was calculated. Select and deselect updates with the checkboxes or the presets *Low risk only*,
 *Security updates* and *All*.
 
@@ -56,9 +70,22 @@ a locked pacman database and a pending reboot. *Hold all back* and *Update toget
 
 ## Security
 
-Advisories from the Arch Linux Security Tracker that affect installed package versions, with severity, CVE
-numbers and status: *fixed by update*, *fixed upstream – update not available* or *open – no fix*. A button
-selects the fixing update.
+Single values count the affected packages per severity. Filter by severity or search for a package or CVE.
+
+Each entry shows:
+
+- the **package** in large type with the installed version, and on the right what the planner concludes:
+  *fixed by update* (with a button to select the update), *fixed upstream – update not available* or
+  *open – no fix*;
+- the advisory group (AVG, linked to the tracker) and the type of vulnerability;
+- the tracker's fields: **Status** (Vulnerable, Fixed, Unknown, Testing), **Severity** (Critical, High, Medium,
+  Low, Unknown), **Fixed** (the fixed version or Unknown), **Affected**, **Installed**, the pending **Update**
+  and the attack **Vector**;
+- the CVE numbers, each linked to its tracker page;
+- the **description** of the first CVE that has one.
+
+Descriptions are fetched from the tracker's CVE pages and cached for seven days. The tracker limits the request
+rate, so the first load can take a few seconds longer.
 
 ## AUR scanner
 
@@ -78,9 +105,17 @@ The scanner matches text patterns. It helps you decide where to look; it does no
 1. **Plan update** (overview) or **Update selected** (updates page) opens the **context dialog**: number of
    packages, download size, highest risk, reboot hint, warnings from the AUR scanner and from news. Options:
    snapshot, include AUR, include Flatpak, **dry run**, and a risk limit above which updates are held back.
+   Under *Clean up after the update* you can choose to
+   - **remove orphaned packages** – after the update the planner determines them again and shows the list;
+     they are only removed with `pacman -Rns` when you confirm;
+   - **clean the package cache** – `paccache` keeps 1, 2 or 3 versions of each installed package and removes all
+     cached versions of packages that are no longer installed. The dialog shows the cache size and how much would
+     be freed.
+
+   The dialog also opens when there are no updates but something to clean up.
 2. The **password dialog** asks for your sudo password and checks it immediately. A dry run needs no password.
 3. The **progress dialog** shows overall and phase progress, the phases (Preparation, Snapshot, Repo, AUR,
-   Flatpak, Finish) and the live log. If the AUR scanner finds suspicious patterns in a package right before
+   Flatpak, Clean up, Finish) and the live log. If the AUR scanner finds suspicious patterns in a package right before
    building it, you are asked whether to build or skip it.
 4. At the end you see what succeeded or was skipped, new `.pacnew` files, whether a reboot is required, and the
    path of the log file. The system state is reloaded automatically.
@@ -89,7 +124,7 @@ The scanner matches text patterns. It helps you decide where to look; it does no
 
 The dry run shows what would happen without changing anything: it lists the repo packages pacman would update
 (honouring held packages), clones and scans AUR packages and checks their dependencies, and lists the Flatpak
-updates. No `sudo` command is run.
+updates, lists orphaned packages and runs `paccache` in dry-run mode. No `sudo` command is run.
 
 ## Languages
 

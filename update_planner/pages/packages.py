@@ -5,11 +5,21 @@ from nicegui import ui
 from .. import catalog as md
 from .. import state as st
 from ..i18n import _
+from .. import theme
 from ..theme import card
-from .overview import loading_card
+from .overview import dashboard_header, loading_card
 
 MAX_NODES = 60
 MAX_USERS = 20
+
+SEC_SLOT = r'''
+<q-td :props="props">
+  <span v-if="props.row.sev" class="q-badge" :style="{background: props.row.sev_color,
+        color: ['#f8be34', '#f1813f', '#53a051'].includes(props.row.sev_color) ? '#111' : '#fff'}">
+    {{ props.row.sev_label }}<span v-if="props.row.sev_count > 1"> ×{{ props.row.sev_count }}</span>
+  </span>
+</q-td>
+'''
 
 
 def conflict_pkgs() -> set[str]:
@@ -47,17 +57,27 @@ def graph_options(center: str) -> dict:
     for name, depth in nodes.items():
         pkg = md.package(name) or {'source': 'repo'}
         upd = md.update(name)
-        border = '#ef4444' if name in conflicts else '#f59e0b' if upd else 'rgba(0,0,0,0)'
+        vuln = md.vulnerability(name)
+        # Rand: Sicherheitslücke (Farbe = Schweregrad) vor Inkompatibilität (gestrichelt) vor Update (gepunktet)
+        if vuln:
+            style = {'borderColor': theme.SEVERITY_COLOR[vuln['severity']], 'borderWidth': 4, 'borderType': 'solid'}
+        elif name in conflicts:
+            style = {'borderColor': theme.RED, 'borderWidth': 2, 'borderType': 'dashed'}
+        elif upd:
+            style = {'borderColor': theme.GREEN, 'borderWidth': 2, 'borderType': 'dotted'}
+        else:
+            style = {'borderWidth': 0}
         data.append({
             'name': name, 'category': cats.index(pkg['source']),
             'symbolSize': 46 if name == center else 30 if depth in (1, -1) else 20,
-            'itemStyle': {'borderColor': border, 'borderWidth': 3 if border != 'rgba(0,0,0,0)' else 0,
-                          'shadowBlur': 12, 'shadowColor': 'rgba(0,0,0,.18)'},
+            'itemStyle': style,
             'label': {'show': True, 'position': 'right', 'fontSize': 11, 'color': '#64748b',
                       'fontWeight': 700 if name == center else 400},
             'tooltip': {'formatter': f'{name}<br/>{pkg.get("version", "")}'
                                      + (_('<br/>Update → {new} (Risiko {risk})', new=upd['new'], risk=upd['risk']) if upd else '')
-                                     + (_('<br/>⚠ potenzielle Inkompatibilität') if name in conflicts else '')},
+                                     + (_('<br/>⚠ potenzielle Inkompatibilität') if name in conflicts else '')
+                                     + (_('<br/>Sicherheitslücken: {n} ({sev})', n=vuln['count'], sev=_(vuln['severity']))
+                                        if vuln else '')},
         })
     return {
         'backgroundColor': 'transparent',
@@ -84,9 +104,8 @@ def page() -> None:
 
     @ui.refreshable
     def content() -> None:
-        with ui.column().classes('gap-0'):
-            ui.label(_('Installierte Software')).classes('text-2xl font-bold')
-            ui.label(_('Paket anklicken, um seine Abhängigkeiten als Graph zu sehen (max. 2 Ebenen, gekürzt bei großen Bäumen)')).classes('muted text-sm')
+        dashboard_header(_('Installierte Software'),
+                         _('Paket anklicken, um seine Abhängigkeiten als Graph zu sehen (max. 2 Ebenen, gekürzt bei großen Bäumen)'))
         if loading_card():
             return
         pkgs = s.visible_packages()
@@ -94,15 +113,25 @@ def page() -> None:
             current['name'] = next((p['name'] for p in pkgs if p['name'].startswith('linux-cachyos')), '')
         if current['name'] not in {p['name'] for p in pkgs} and pkgs:
             current['name'] = pkgs[0]['name']
-        rows = [dict(p, id=p['name'], src=md.SOURCES[p['source']]['label'], ndeps=len(p['deps']),
-                     upd='●' if md.update(p['name']) else '') for p in pkgs]
+        rows = []
+        for p in pkgs:
+            v = md.vulnerability(p['name'])
+            rows.append(dict(p, id=p['name'], src=md.SOURCES[p['source']]['label'], ndeps=len(p['deps']),
+                             upd='●' if md.update(p['name']) else '',
+                             sev=v['severity'] if v else '', sev_label=_(v['severity']) if v else '',
+                             sev_rank=md.SEVERITY_RANK.get(v['severity'], 0) + 1 if v else 0,
+                             sev_color=theme.SEVERITY_COLOR.get(v['severity'], theme.GREY) if v else '',
+                             sev_count=v['count'] if v else 0))
+        affected = sum(1 for r in rows if r['sev'])
 
         with ui.grid().classes('w-full gap-4 grid-cols-1 xl:grid-cols-5'):
             with card('xl:col-span-2 p-2'):
-                search = ui.input(placeholder=_('Paket suchen …')).props('dense outlined rounded clearable') \
-                    .classes('w-full px-2 pt-2')
-                with search.add_slot('prepend'):
-                    ui.icon('search')
+                with ui.row().classes('w-full items-center gap-3 px-2 pt-2 no-wrap'):
+                    search = ui.input(placeholder=_('Paket suchen …')).props('dense outlined clearable') \
+                        .classes('flex-1')
+                    with search.add_slot('prepend'):
+                        ui.icon('search')
+                    only_vuln = ui.checkbox(_('Nur betroffene ({n})', n=affected), value=False).props('dense')
                 table = ui.table(
                     rows=rows, row_key='id',
                     columns=[
@@ -110,19 +139,32 @@ def page() -> None:
                         {'name': 'src', 'label': _('Quelle'), 'field': 'src', 'sortable': True, 'align': 'left'},
                         {'name': 'version', 'label': _('Version'), 'field': 'version', 'align': 'left'},
                         {'name': 'ndeps', 'label': _('Abh.'), 'field': 'ndeps', 'sortable': True},
-                        {'name': 'upd', 'label': _('Upd.'), 'field': 'upd', 'classes': 'text-amber-500'},
+                        {'name': 'upd', 'label': _('Upd.'), 'field': 'upd', 'style': f'color:{theme.GREEN}'},
+                        {'name': 'sec', 'label': _('Sicherheit'), 'field': 'sev_rank', 'sortable': True, 'align': 'left'},
                     ],
                     pagination={'rowsPerPage': 12},
                 ).classes('w-full cursor-pointer').props('flat dense')
+                table.add_slot('body-cell-sec', SEC_SLOT)
                 search.bind_value_to(table, 'filter')
+
+                def apply_filter(e) -> None:
+                    table.rows = [r for r in rows if r['sev']] if e.value else rows
+                    if e.value:
+                        table.pagination = {'rowsPerPage': 12, 'sortBy': 'sec', 'descending': True}
+                    table.update()
+                only_vuln.on_value_change(apply_filter)
 
             with card('xl:col-span-3'):
                 title = ui.label().classes('section-title')
                 info = ui.label().classes('muted text-sm')
+                vuln_line = ui.label().classes('font-medium')
                 chart = ui.echart(graph_options(current['name'])).classes('w-full').style('height:520px')
                 with ui.row().classes('gap-4 text-xs muted'):
-                    ui.html('<span style="color:#f59e0b">◯</span> ' + escape(_('Update verfügbar')), sanitize=False)
-                    ui.html('<span style="color:#ef4444">◯</span> ' + escape(_('potenzielle Inkompatibilität')), sanitize=False)
+                    for color, label in [(theme.RED, _('Sicherheitslücke kritisch')), (theme.ORANGE, _('hoch')),
+                                         (theme.YELLOW, _('mittel')), (theme.BLUE, _('niedrig'))]:
+                        ui.html(f'<span style="color:{color}">●</span> ' + escape(label), sanitize=False)
+                    ui.html(f'<span style="color:{theme.RED}">◌</span> ' + escape(_('potenzielle Inkompatibilität')), sanitize=False)
+                    ui.html(f'<span style="color:{theme.GREEN}">◌</span> ' + escape(_('Update verfügbar')), sanitize=False)
                     ui.label(_('Mausrad: Zoom · Ziehen: Knoten verschieben'))
 
         def show(name: str) -> None:
@@ -131,9 +173,14 @@ def page() -> None:
             if not pkg:
                 return
             title.text = name
+            v = md.vulnerability(name)
             info.text = (f'{pkg["desc"]} · {pkg["version"]} · {pkg["size"]:.1f} MiB · '
                          + _('{deps} Abhängigkeiten · {users} Nutzer', deps=len(pkg['deps']), users=len(md.dependents(name)))
                          + (_(' (Graph zeigt {n})', n=MAX_USERS) if len(md.dependents(name)) > MAX_USERS else ''))
+            vuln_line.text = (_('Sicherheitslücken: {n}, höchster Schweregrad {sev} ({ids})', n=v['count'],
+                                sev=_(v['severity']), ids=', '.join(v['ids'][:4])) if v else '')
+            vuln_line.style(f'color:{theme.SEVERITY_COLOR[v["severity"]]}' if v else '')
+            vuln_line.set_visibility(bool(v))
             chart.options.clear()
             chart.options.update(graph_options(name))
             chart.update()

@@ -5,17 +5,12 @@ from .. import state as st
 from ..dialogs import expand_holds, start_update
 from ..i18n import _
 from ..theme import card
-from .overview import loading_card
+from .overview import dashboard_header, loading_card
 
 RISK_SLOT = r'''
 <q-td :props="props">
-  <div class="row items-center no-wrap" style="gap:10px">
-    <div class="risk-bar" style="flex:1">
-      <div :style="{width: props.value + '%',
-                    background: props.value >= 60 ? '#ef4444' : props.value >= 30 ? '#f59e0b' : '#22c55e'}"></div>
-    </div>
-    <b style="width:26px;text-align:right">{{ props.value }}</b>
-  </div>
+  <span class="cell-num" :style="{background: props.value >= 60 ? '#dc4e41' : props.value >= 45 ? '#f1813f'
+        : props.value >= 30 ? '#f8be34' : '#53a051'}">{{ props.value }}</span>
   <q-tooltip class="text-body2" max-width="340px">
     <div v-for="r in props.row.reasons" :key="r[0]">{{ r[1] > 0 ? '+' : '' }}{{ r[1] }} · {{ r[0] }}</div>
   </q-tooltip>
@@ -24,7 +19,7 @@ RISK_SLOT = r'''
 
 SOURCE_SLOT = r'''
 <q-td :props="props">
-  <q-badge :style="{background: props.row.color}" rounded>{{ props.row.source_label }}</q-badge>
+  <q-badge :style="{background: props.row.color}">{{ props.row.source_label }}</q-badge>
 </q-td>
 '''
 
@@ -42,23 +37,24 @@ def page() -> None:
 
     @ui.refreshable
     def content() -> None:
-        with ui.row().classes('w-full items-end justify-between'):
-            with ui.column().classes('gap-0'):
-                ui.label(_('Anstehende Updates')).classes('text-2xl font-bold')
-                ui.label(_('Risk Score 0–100 · Maus über den Balken zeigt die Begründung')).classes('muted text-sm')
-            summary = ui.label().classes('muted')
+        refs = {}
+
+        def actions() -> None:
+            refs['summary'] = ui.label().classes('muted')
+        dashboard_header(_('Anstehende Updates'),
+                         _('Risk Score von 0 bis 100. Zeigen Sie auf den Wert, um die Begründung zu sehen.'), actions)
+        summary = refs['summary']
         if loading_card():
             return
         rows = [dict(u, color=md.SOURCES[u['source']]['color'], source_label=md.SOURCES[u['source']]['label'])
                 for u in s.visible_updates()]
-        partial = ui.row().classes('w-full items-center gap-2 p-3 no-wrap') \
-            .style('background:rgba(245,158,11,.12);border-radius:12px')
+        partial = ui.row().classes('notice w-full items-center gap-2 no-wrap').style('border-left-color:#f8be34')
         with partial:
             ui.icon('warning', color='warning')
             partial_text = ui.label('').classes('text-sm')
 
         with card('w-full p-2'):
-            search = ui.input(placeholder=_('Update suchen …')).props('dense outlined rounded clearable').classes('w-72 px-2 pt-2')
+            search = ui.input(placeholder=_('Update suchen …')).props('dense outlined clearable').classes('w-72 px-2 pt-2')
             with search.add_slot('prepend'):
                 ui.icon('search')
             table = ui.table(
@@ -100,12 +96,12 @@ def page() -> None:
                 def pick(pred):
                     table.selected = [r for r in rows if pred(r)]
                     sync()
-                ui.button(_('Nur niedriges Risiko'), icon='verified', on_click=lambda: pick(lambda r: r['risk'] < 30)).props('flat rounded')
+                ui.button(_('Nur niedriges Risiko'), icon='verified', on_click=lambda: pick(lambda r: r['risk'] < 30)).props('flat')
                 ui.button(_('Sicherheitsupdates'), icon='shield', on_click=lambda: pick(
-                    lambda r: any(c['package'] == r['name'] for c in md.CVES))).props('flat rounded')
-                ui.button(_('Alle'), icon='done_all', on_click=lambda: pick(lambda r: True)).props('flat rounded')
-            ui.button(_('Ausgewählte aktualisieren'), icon='rocket_launch', on_click=lambda: start_update(s)) \
-                .props('unelevated rounded size=lg')
+                    lambda r: any(c['package'] == r['name'] for c in md.CVES))).props('flat')
+                ui.button(_('Alle'), icon='done_all', on_click=lambda: pick(lambda r: True)).props('flat')
+            ui.button(_('Ausgewählte aktualisieren'), icon='system_update_alt', on_click=lambda: start_update(s)) \
+                .props('unelevated color=primary')
 
     content()
     s.on_change = content.refresh

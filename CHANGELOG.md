@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.2.0 – 2026-11-20
+
+- **Dashboard design modelled on Splunk:** dark system bar and horizontal app navigation instead of the side
+  panel, flat panels with 1-px borders, single values colored by thresholds, dense zebra tables with colored
+  risk cells, sentence-case buttons, no glass, blur, shadows or gradients. Dark theme by default; the light
+  theme follows Splunk Enterprise. Typeface Fira Sans (falls back to Noto Sans).
+- **Overview:** new chart of package changes per day over 60 days from `pacman.log`, risk distribution,
+  riskiest updates as a table, system panel.
+- **Security page rebuilt:** package in large type; tracker fields Status, Severity, Fixed, Affected,
+  Installed, Update and Vector; CVE links; description from the tracker's CVE pages (cached, rate-limit aware);
+  filter by severity and search.
+- **Clean up after updates:** the update dialog offers to remove orphaned packages (the list is shown again
+  after the update and nothing is removed without confirmation) and to clean the package cache with `paccache`
+  (keep 1–3 versions, remove uninstalled packages), with the current cache size and expected savings. New phase
+  *Clean up*; the dry run lists orphans and runs `paccache` read-only.
+- **Package overview marks vulnerable packages:** new *Security* column with the highest severity and the number
+  of tracker entries, *Affected only* filter, severity-colored rings in the dependency graph.
+- **New logo** with transparent background.
+- Source colors and charts use the Splunk series palette.
+
 ## 1.1.0 – 2026-11-16
 
 - **Opens on the current virtual desktop.** 1.0.0 created a second virtual desktop and a KWin rule that moved

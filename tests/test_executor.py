@@ -153,3 +153,54 @@ def test_unexpected_error_returns_result(monkeypatch, calls):
     r = asyncio.run(executor.Runner(executor.Plan(repo=True, snapshot=False), cbs([]), SECRET, {}).run())
     assert not r.ok and 'FileNotFoundError' in r.errors[0]
     assert not executor.running()
+
+
+def _cbs_answer(log, answer, asked):
+    async def ask(title, text, yes, no):
+        asked.append((title, text))
+        return answer
+    return executor.Callbacks(phase=lambda p: None, progress=lambda a, b: None, log=log.append, ask=ask)
+
+
+def _no_sudo_cmds(calls):
+    return [c[6:] for c, _ in calls if c[0] == 'sudo']
+
+
+@pytest.mark.parametrize('answer', [True, False])
+def test_orphans_removed_only_after_confirmation(calls, monkeypatch, answer):
+    monkeypatch.setattr(executor.pacman_src, 'orphans', lambda: ['python-old', 'libfoo'])
+    asked, log = [], []
+    plan = executor.Plan(repo=False, snapshot=False, remove_orphans=True)
+    r = asyncio.run(executor.Runner(plan, _cbs_answer(log, answer, asked), SECRET, {}).run())
+    assert r.ok and len(asked) == 1 and 'python-old' in asked[0][1]
+    removes = [c for c in _no_sudo_cmds(calls) if c[:2] == ['pacman', '-Rns']]
+    if answer:
+        assert removes == [['pacman', '-Rns', '--noconfirm', '--noprogressbar', 'python-old', 'libfoo']]
+        assert r.removed == ['python-old', 'libfoo']
+    else:
+        assert removes == [] and r.removed == []
+
+
+def test_no_question_without_orphans(calls, monkeypatch):
+    monkeypatch.setattr(executor.pacman_src, 'orphans', lambda: [])
+    asked = []
+    plan = executor.Plan(repo=False, snapshot=False, remove_orphans=True)
+    r = asyncio.run(executor.Runner(plan, _cbs_answer([], True, asked), SECRET, {}).run())
+    assert r.ok and asked == [] and calls == []
+
+
+def test_cache_cleanup_commands(calls):
+    plan = executor.Plan(repo=False, snapshot=False, clean_cache=True, cache_keep=1)
+    r = asyncio.run(executor.Runner(plan, cbs([]), SECRET, {}).run())
+    assert r.ok and r.cache_cleaned
+    assert _no_sudo_cmds(calls) == [['paccache', '-rk', '1'], ['paccache', '-ruk0']]
+    assert 'Aufräumen' in plan.phases()
+
+
+def test_cleanup_dry_run_uses_no_sudo(calls, monkeypatch):
+    monkeypatch.setattr(executor.pacman_src, 'orphans', lambda: ['python-old'])
+    asked = []
+    plan = executor.Plan(repo=False, snapshot=False, dry_run=True, remove_orphans=True, clean_cache=True)
+    r = asyncio.run(executor.Runner(plan, _cbs_answer([], True, asked), None, {}).run())
+    assert r.ok and asked == [] and not r.cache_cleaned
+    assert [c for c, _ in calls] == [['paccache', '-dk', '2'], ['paccache', '-duk0']]

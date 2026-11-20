@@ -8,7 +8,9 @@ from .. import state as st
 from ..i18n import _
 from ..sources import aur as aur_src
 from ..sysutil import NAME_RE
+from .. import theme
 from ..theme import card
+from .overview import dashboard_header
 
 SEV_COLOR = sc.SEVERITY_COLOR
 
@@ -32,12 +34,12 @@ def diff_html(lines: list[tuple[str, str]]) -> str:
 
 def finding_row(f: sc.Finding) -> None:
     with ui.row().classes('w-full items-start gap-3 no-wrap py-2').style('border-bottom:1px solid var(--line)'):
-        ui.badge(_(f.severity), color=SEV_COLOR[f.severity]).props('rounded').classes('mt-1 min-w-[64px] justify-center')
+        ui.badge(_(f.severity), color=SEV_COLOR[f.severity]).classes('mt-1 min-w-[64px] justify-center')
         with ui.column().classes('gap-0 flex-1 min-w-0'):
             with ui.row().classes('items-center gap-2'):
                 ui.label(_(f.title)).classes('font-medium')
                 if f.new_in_update:
-                    ui.badge(_('neu im Update'), color='accent').props('outline rounded')
+                    ui.badge(_('neu im Update'), color='accent').props('outline')
             loc = f'{f.file}:{f.line}' if f.file else _('AUR-Metadaten')
             ui.label(f'{f.rule_id} · {_(f.category)} · {loc}').classes('muted text-xs')
             if f.code:
@@ -95,25 +97,27 @@ def page() -> None:
         if results and not md.SCANS.get(current['name']):  # auch None-Einträge (Scan ohne Metadaten)
             current['name'] = results[0].package
 
-        with ui.row().classes('w-full items-end justify-between'):
-            with ui.column().classes('gap-0'):
-                ui.label(_('AUR-Sicherheitsscanner')).classes('text-2xl font-bold')
-                ui.label(_('{n} Regeln · PKGBUILD, .install und AUR-Metadaten · statische Analyse, kein Code wird ausgeführt',
-                           n=len(sc.RULES) + 7)).classes('muted text-sm')
+        refs = {}
+
+        def actions() -> None:
             with ui.row().classes('gap-2 items-center'):
-                lookup = ui.input(placeholder=_('AUR-Paket prüfen, z. B. yay-bin')).props('dense outlined rounded') \
+                refs['lookup'] = ui.input(placeholder=_('AUR-Paket prüfen, z. B. yay-bin')).props('dense outlined') \
                     .classes('w-64')
-                lookup_btn = ui.button(icon='travel_explore').props('flat round').tooltip(_('Aus dem AUR laden und scannen'))
+                refs['lookup_btn'] = ui.button(icon='travel_explore').props('flat dense').tooltip(_('Aus dem AUR laden und scannen'))
                 ui.button(_('Eigenes PKGBUILD'), icon='content_paste_search', on_click=custom_scan_dialog) \
-                    .props('flat rounded no-caps')
-                rescan_btn = ui.button(_('Alle neu scannen'), icon='radar').props('unelevated rounded no-caps')
+                    .props('flat')
+                refs['rescan_btn'] = ui.button(_('Alle neu scannen'), icon='radar').props('unelevated color=primary')
+        dashboard_header(_('AUR-Sicherheitsscanner'),
+                         _('{n} Regeln · PKGBUILD, .install und AUR-Metadaten · statische Analyse, kein Code wird ausgeführt',
+                           n=len(sc.RULES) + 7), actions)
+        lookup, lookup_btn, rescan_btn = refs['lookup'], refs['lookup_btn'], refs['rescan_btn']
 
         if not visible:
             with card():
                 ui.label(_('AUR ist im Quellenfilter ausgeblendet.')).classes('muted')
             return
 
-        bar = ui.linear_progress(0, show_value=False, size='4px').props('rounded').classes('w-full')
+        bar = ui.linear_progress(0, show_value=False, size='4px').classes('w-full')
         bar.set_visibility(False)
 
         async def rescan() -> None:
@@ -185,13 +189,10 @@ def page() -> None:
                     verdict, color, icon = r.verdict
                     upd = md.update(r.package)
                     active = r.package == current['name']
-                    with card('w-full cursor-pointer p-4' + (' ring-2 ring-teal-400' if active else '')) \
+                    with card('w-full cursor-pointer').style('border-left:3px solid ' + ('#1e93c6' if active else 'transparent')) \
                             .on('click', lambda n=r.package: select(n)):
                         with ui.row().classes('w-full items-center no-wrap gap-3'):
-                            ui.circular_progress(r.score, max=100, size='46px', show_value=True,
-                                                 color={'negative': 'red-5', 'warning': 'amber-6',
-                                                        'info': 'light-blue-5', 'positive': 'green-5'}[color]) \
-                                .props('thickness=0.18 track-color=grey-4 font-size=13px')
+                            theme.badge(str(r.score), theme.threshold(r.score, 15, 70))
                             with ui.column().classes('gap-0 flex-1 min-w-0'):
                                 ui.label(r.package).classes('font-semibold truncate')
                                 ui.label((f'{upd["old"]} → {upd["new"]}' if upd else (_('nur geprüft – nicht installiert') if md.AUR_META.get(r.package, {}).get('lookup') else _('kein Update')))).classes('muted text-xs')
@@ -201,7 +202,7 @@ def page() -> None:
                             with ui.column().classes('gap-1 items-end'):
                                 for sev in ('kritisch', 'hoch', 'mittel'):
                                     if r.count(sev):
-                                        ui.badge(f'{r.count(sev)} {_(sev)}', color=SEV_COLOR[sev]).props('rounded')
+                                        ui.badge(f'{r.count(sev)} {_(sev)}', color=SEV_COLOR[sev])
 
             detail = ui.column().classes('xl:col-span-5 gap-4')
 
@@ -244,8 +245,8 @@ def page() -> None:
                         content.refresh()
                     if r.package in s.reviewed:
                         ui.chip(_('manuell geprüft'), icon='task_alt', color='positive').props('outline')
-                    ui.button(_('Vom Update ausschließen'), icon='block', on_click=hold).props('flat rounded no-caps')
-                    ui.button(_('Als geprüft markieren'), icon='task_alt', on_click=reviewed).props('flat rounded no-caps')
+                    ui.button(_('Vom Update ausschließen'), icon='block', on_click=hold).props('flat no-caps')
+                    ui.button(_('Als geprüft markieren'), icon='task_alt', on_click=reviewed).props('flat no-caps')
 
             with card('w-full p-2'):
                 with ui.tabs().props('dense align=left no-caps active-color=primary indicator-color=primary') as tabs:

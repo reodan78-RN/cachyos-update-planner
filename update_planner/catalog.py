@@ -19,9 +19,9 @@ from .sources import aur, flatpak, news, pacman, security, system
 log = logging.getLogger(__name__)
 
 SOURCES = {
-    'repo': {'label': 'Repo', 'icon': 'inventory_2', 'color': '#14b8a6'},
-    'aur': {'label': 'AUR', 'icon': 'construction', 'color': '#f59e0b'},
-    'flatpak': {'label': 'Flatpak', 'icon': 'widgets', 'color': '#6366f1'},
+    'repo': {'label': 'Repo', 'icon': 'inventory_2', 'color': '#1e93c6'},
+    'aur': {'label': 'AUR', 'icon': 'construction', 'color': '#ed8440'},
+    'flatpak': {'label': 'Flatpak', 'icon': 'widgets', 'color': '#6a5c9e'},
 }
 
 PACKAGES: list[dict] = []
@@ -39,6 +39,7 @@ VERSION = 0
 _index: dict[str, dict] = {}
 _upd_index: dict[str, dict] = {}
 _dependents: dict[str, list[str]] = {}
+_vuln_index: dict[str, dict] = {}
 _lock = asyncio.Lock()
 
 
@@ -50,6 +51,14 @@ def package(name: str) -> dict | None:
 
 def update(name: str) -> dict | None:
     return _upd_index.get(name)
+
+
+SEVERITY_RANK = {'kritisch': 4, 'hoch': 3, 'mittel': 2, 'niedrig': 1, 'unbekannt': 0}
+
+
+def vulnerability(name: str) -> dict | None:
+    """Höchster Schweregrad und Anzahl der Tracker-Einträge für ein installiertes Paket, sonst None."""
+    return _vuln_index.get(name)
 
 
 def dependents(name: str) -> list[str]:
@@ -74,12 +83,20 @@ def ready() -> bool:
 
 def _publish(data: dict) -> None:
     global PACKAGES, UPDATES, CONFLICTS, CVES, NEWS, SCANS, AUR_META, GROUPS, SYSTEM, VERSION
-    global _index, _upd_index, _dependents
+    global _index, _upd_index, _dependents, _vuln_index
     PACKAGES, UPDATES, CONFLICTS = data['packages'], data['updates'], data['conflicts']
     CVES, NEWS, SCANS, AUR_META = data['cves'], data['news'], data['scans'], data['aur_meta']
     GROUPS, SYSTEM = data['groups'], data['system']
     _index = {p['name']: p for p in PACKAGES}
     _upd_index = {u['name']: u for u in UPDATES}
+    vuln: dict[str, dict] = {}
+    for c in CVES:
+        v = vuln.setdefault(c['package'], {'severity': 'unbekannt', 'count': 0, 'ids': []})
+        v['count'] += 1
+        v['ids'].append(c['id'])
+        if SEVERITY_RANK.get(c['severity'], 0) > SEVERITY_RANK[v['severity']]:
+            v['severity'] = c['severity']
+    _vuln_index = vuln
     deps: dict[str, list[str]] = {}
     for p in PACKAGES:
         for d in p['deps']:
@@ -94,14 +111,32 @@ def load_demo() -> None:
     from . import aur_samples, mockdata
     _publish(dict(
         packages=mockdata.PACKAGES, updates=mockdata.UPDATES, conflicts=mockdata.CONFLICTS,
-        cves=[dict(c, cves=[c['id']], link='', installed='') for c in mockdata.CVES],
+        cves=[_demo_cve(c) for c in mockdata.CVES],
         news=[dict(n, source='Demo', link='', new=True) for n in mockdata.NEWS],
         scans=mockdata.SCANS, aur_meta=aur_samples.AUR_META, groups=[['linux-cachyos', 'linux-cachyos-nvidia'], ['mesa', 'llvm-libs']],
         system=dict(os='CachyOS (Demo)', kernel='6.17.7-1-cachyos', fs='btrfs', snapper=True, snap_pac=False,
                     limine_snapper=False, free_gib=120.0, reboot_pending=False, aur_helper='paru',
-                    last_upgrade='2026-11-10T08:12:00', pacnew=['/etc/locale.gen.pacnew']),
+                    last_upgrade='2026-11-10T08:12:00', pacnew=['/etc/locale.gen.pacnew'], history=_demo_history(),
+                    orphans=['python-setuptools-scm', 'lib32-libva-mesa-driver', 'qt5-tools'],
+                    cache=dict(size_gib=14.2, candidates=842, saved_gib=5.6, keep=2)),
     ))
     STATUS.update(state='ready', step='', demo=True, loaded_at=time.time(), warnings=[])
+
+
+def _demo_cve(c: dict) -> dict:
+    fixed = None if c['fixed_in'] == '—' else c['fixed_in']
+    sev = {'kritisch': 'Critical', 'hoch': 'High', 'mittel': 'Medium', 'niedrig': 'Low'}.get(c['severity'], 'Unknown')
+    return dict(c, cves=[c['id']], link='', installed=c.get('installed', ''), new=fixed or '', fixed=fixed,
+                tracker_status='Vulnerable', tracker_severity=sev, affected='', vector='Remote',
+                description=c.get('description', ''))
+
+
+def _demo_history() -> list[dict]:
+    from datetime import date, timedelta
+    pattern = [0, 0, 3, 0, 0, 0, 41, 0, 0, 2, 0, 0, 0, 0, 118, 0, 0, 0, 6, 0, 0, 0, 73, 0, 0, 1, 0, 0, 0, 0]
+    start = date.today() - timedelta(days=59)
+    return [dict(date=(start + timedelta(days=i)).isoformat(), upgraded=pattern[i % 30], installed=1 if i % 17 == 0 else 0,
+                 removed=0) for i in range(60)]
 
 
 # ------------------------------------------------------------------ echter Systemstand
@@ -147,6 +182,17 @@ async def _collect() -> dict:
     sysinfo = await asyncio.to_thread(system.info)
     # pacman.log kann viele MB groß sein – nicht im Event-Loop lesen
     sysinfo['last_upgrade'] = await asyncio.to_thread(pacman.last_upgrade)
+    sysinfo['history'] = await asyncio.to_thread(pacman.history, 60)
+    try:
+        sysinfo['orphans'] = await asyncio.to_thread(pacman.orphans)
+    except Exception as exc:  # noqa: BLE001 – Zusatzinformation
+        log.warning('Verwaiste Pakete nicht ermittelbar: %s', exc)
+        sysinfo['orphans'] = []
+    try:
+        sysinfo['cache'] = await asyncio.to_thread(pacman.cache_info, 2)
+    except Exception as exc:  # noqa: BLE001
+        log.warning('Paket-Cache nicht auswertbar: %s', exc)
+        sysinfo['cache'] = {}
     sysinfo['pacnew'] = await asyncio.to_thread(pacman.pacnew_files)
     sysinfo['db_locked'] = pacman.db_locked()
 
@@ -183,6 +229,11 @@ async def _collect() -> dict:
     except Exception as exc:  # noqa: BLE001
         _warn(_('Arch Security Tracker nicht erreichbar: {err}', err=exc))
         cves = []
+    if cves:
+        try:
+            await security.describe(cves)
+        except Exception as exc:  # noqa: BLE001 – Beschreibungen sind Zusatzinformation
+            log.warning('CVE-Beschreibungen nicht ladbar: %s', exc)
 
     _step(_('News laden …'))
     try:

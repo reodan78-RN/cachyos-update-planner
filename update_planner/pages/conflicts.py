@@ -4,7 +4,7 @@ from .. import catalog as md
 from .. import state as st
 from ..i18n import _
 from ..theme import card
-from .overview import loading_card
+from .overview import dashboard_header, loading_card
 
 SEV = {'hoch': ('negative', 'error'), 'mittel': ('warning', 'warning'), 'niedrig': ('info', 'info')}
 ORDER = ['hoch', 'mittel', 'niedrig']
@@ -15,10 +15,9 @@ def page() -> None:
 
     @ui.refreshable
     def content() -> None:
-        with ui.column().classes('gap-0'):
-            ui.label(_('Potenzielle Inkompatibilitäten')).classes('text-2xl font-bold')
-            ui.label(_('Abhängigkeitsanalyse der neuen Versionen, Fremdpaket-Neubauten, Konfigurationsdateien, '
-                       'News und Systemzustand')).classes('muted text-sm')
+        dashboard_header(_('Potenzielle Inkompatibilitäten'),
+                         _('Abhängigkeitsanalyse der neuen Versionen, Fremdpaket-Neubauten, Konfigurationsdateien, '
+                           'News und Systemzustand'))
         if loading_card():
             return
         visible = {p['name'] for p in s.visible_packages()}
@@ -38,7 +37,7 @@ def page() -> None:
                     with ui.row().classes('items-center gap-3 no-wrap'):
                         ui.icon(icon, size='26px', color=color)
                         ui.label(c['title']).classes('section-title flex-1')
-                        ui.badge(_(c['severity']), color=color).props('rounded')
+                        ui.badge(_(c['severity']), color=color)
                     if c['packages']:
                         with ui.row().classes('gap-1 my-2'):
                             for p in c['packages'][:12]:
@@ -47,10 +46,9 @@ def page() -> None:
                             if len(c['packages']) > 12:
                                 ui.label(f'+{len(c["packages"]) - 12}').classes('muted text-sm self-center')
                     ui.label(c['text']).classes('text-sm mt-2')
-                    with ui.row().classes('items-start gap-2 mt-3 p-3 w-full no-wrap') \
-                            .style('background:rgba(20,184,166,.10);border-radius:12px'):
-                        ui.icon('lightbulb', color='primary')
-                        ui.label(c['advice']).classes('text-sm')
+                    with ui.row().classes('notice items-baseline gap-2 mt-2 w-full no-wrap').style('border-left-color:#1e93c6'):
+                        ui.label(_('Empfehlung')).classes('field-key shrink-0')
+                        ui.label(c['advice'])
                     updatable = [p for p in c['packages'] if md.update(p)]
                     with ui.row().classes('w-full justify-end gap-1 mt-2'):
                         if c.get('link'):
@@ -63,8 +61,8 @@ def page() -> None:
                             def together(names=updatable):
                                 s.selected |= set(names)
                                 ui.notify(_('{n} Pakete gemeinsam ausgewählt', n=len(names)), type='positive', position='top-right')
-                            ui.button(_('Alle zurückhalten'), icon='pause_circle', on_click=hold).props('flat rounded dense no-caps')
-                            ui.button(_('Zusammen aktualisieren'), icon='link', on_click=together).props('flat rounded dense no-caps')
+                            ui.button(_('Alle zurückhalten'), icon='pause_circle', on_click=hold).props('flat dense no-caps')
+                            ui.button(_('Zusammen aktualisieren'), icon='link', on_click=together).props('flat dense no-caps')
 
     content()
     s.on_change = content.refresh

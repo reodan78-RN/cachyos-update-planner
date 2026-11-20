@@ -6,9 +6,9 @@ from .aur_samples import AUR_META
 from .aur_scanner import scan_all
 
 SOURCES = {
-    'repo': {'label': 'Repo', 'icon': 'inventory_2', 'color': '#14b8a6'},
-    'aur': {'label': 'AUR', 'icon': 'construction', 'color': '#f59e0b'},
-    'flatpak': {'label': 'Flatpak', 'icon': 'widgets', 'color': '#6366f1'},
+    'repo': {'label': 'Repo', 'icon': 'inventory_2', 'color': '#1e93c6'},
+    'aur': {'label': 'AUR', 'icon': 'construction', 'color': '#ed8440'},
+    'flatpak': {'label': 'Flatpak', 'icon': 'widgets', 'color': '#6a5c9e'},
 }
 
 # name, quelle, version, größe (MiB), abhängigkeiten, beschreibung
@@ -108,15 +108,15 @@ CONFLICTS: list[dict] = [
 ]
 
 CVES: list[dict] = [
-    dict(id='CVE-2025-8058', package='glibc', severity='hoch', cvss=7.8, status='behoben durch Update',
+    dict(id='CVE-2025-8058', description='The regcomp function in the GNU C library may double-free a buffer when allocation fails, which a crafted regular expression can exploit to corrupt memory.', package='glibc', severity='hoch', cvss=7.8, status='behoben durch Update',
          title='Double-free in regcomp()', fixed_in='2.42+r41-1'),
-    dict(id='CVE-2025-9230', package='openssl', severity='mittel', cvss=5.9, status='behoben durch Update',
+    dict(id='CVE-2025-9230', description='An out-of-bounds read in OpenSSL CMS decryption of password-based recipient info can crash the application or disclose memory.', package='openssl', severity='mittel', cvss=5.9, status='behoben durch Update',
          title='Out-of-bounds read bei CMS-Entschlüsselung', fixed_in='3.6.0-2'),
-    dict(id='CVE-2025-13015', package='org.mozilla.firefox', severity='kritisch', cvss=9.8, status='behoben durch Update',
+    dict(id='CVE-2025-13015', description='A use-after-free in the JavaScript engine allows a malicious web page to execute arbitrary code in the content process.', package='org.mozilla.firefox', severity='kritisch', cvss=9.8, status='behoben durch Update',
          title='Use-after-free in der JavaScript-Engine', fixed_in='145.0.1'),
-    dict(id='CVE-2025-40123', package='linux-cachyos', severity='mittel', cvss=5.5, status='behoben durch Update',
+    dict(id='CVE-2025-40123', description='A missing permission check in the io_uring subsystem lets a local user escalate privileges.', package='linux-cachyos', severity='mittel', cvss=5.5, status='behoben durch Update',
          title='Rechteausweitung im io_uring-Subsystem', fixed_in='6.18.0-1'),
-    dict(id='CVE-2025-6020', package='org.freedesktop.Platform//23.08', severity='hoch', cvss=7.8, status='offen – kein Fix (EOL)',
+    dict(id='CVE-2025-6020', description='pam_namespace follows user-controlled symlinks, allowing a local user to gain elevated privileges.', package='org.freedesktop.Platform//23.08', severity='hoch', cvss=7.8, status='offen – kein Fix (EOL)',
          title='Pfad-Traversal in pam_namespace (Runtime)', fixed_in='—'),
 ]
 

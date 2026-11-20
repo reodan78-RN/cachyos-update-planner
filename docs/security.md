@@ -10,6 +10,8 @@ commands as root. This document describes how that is contained.
   - `pacman -Syu --noconfirm --noprogressbar [--ignore …]` – the repo update
   - `pacman -S --asdeps --needed --noconfirm …` – missing *repo* dependencies of an AUR package
   - `pacman -U --noconfirm …` – install AUR packages that were just built
+  - `pacman -Rns --noconfirm …` – remove orphaned packages, only after you confirmed the displayed list
+  - `paccache -rk<N>` and `paccache -ruk0` – clean the package cache, only when selected
   - `snapper -c root create …` – only when Snapper is configured and `snap-pac` is not installed
 - Flatpak updates run as the user (Flatpak's own polkit rules apply).
 - No command is run through a shell. Package names and Flatpak IDs are validated against strict patterns before

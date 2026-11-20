@@ -49,7 +49,7 @@ fi
 
 # ---- System requirements (only checked – nothing is installed without your consent)
 required=(pacman-contrib expac git python-gobject webkit2gtk-4.1)
-optional=(base-devel flatpak snapper)
+optional=(base-devel flatpak snapper ttf-fira-sans)
 missing=()
 for p in "${required[@]}"; do pacman -Q "$p" >/dev/null 2>&1 || missing+=("$p"); done
 if (( ${#missing[@]} )); then

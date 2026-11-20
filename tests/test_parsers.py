@@ -109,3 +109,21 @@ def test_last_upgrade_reads_from_end(tmp_path):
     log.write_text(filler)
     assert pacman.last_upgrade(log) is None
     assert pacman.last_upgrade(tmp_path / 'fehlt.log') is None
+
+
+def test_paccache_summary_parse():
+    from update_planner.sources import pacman
+    m = pacman.PACCACHE_RE.search('==> finished dry run: 1061 candidates (disk space saved: 6.8 GiB)')
+    assert m and m.group(1) == '1061' and m.group(2) == '6.8' and m.group(3) == 'GiB'
+    assert pacman.PACCACHE_RE.search('==> no candidate packages found for pruning') is None
+
+
+def test_vulnerability_index_uses_highest_severity():
+    catalog.load_demo()
+    catalog.CVES.append(dict(id='AVG-1', package='glibc', severity='kritisch', status='offen – kein Fix'))
+    catalog._publish(dict(packages=catalog.PACKAGES, updates=catalog.UPDATES, conflicts=catalog.CONFLICTS,
+                          cves=catalog.CVES, news=catalog.NEWS, scans=catalog.SCANS, aur_meta=catalog.AUR_META,
+                          groups=catalog.GROUPS, system=catalog.SYSTEM))
+    v = catalog.vulnerability('glibc')
+    assert v['severity'] == 'kritisch' and v['count'] == 2
+    assert catalog.vulnerability('mesa') is None
