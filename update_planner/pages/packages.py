@@ -24,17 +24,22 @@ def graph_options(center: str) -> dict:
 
     def walk(name: str, depth: int) -> None:
         pkg = md.package(name)
-        if not pkg or depth > 2 or len(nodes) >= MAX_NODES:
+        if not pkg or depth > 2:
             return
         for dep in pkg['deps']:
-            links.append((name, dep))
             if dep not in nodes:
+                if len(nodes) >= MAX_NODES:   # Kanten nur zu Knoten, die auch im Graphen sind
+                    continue
                 nodes[dep] = depth
+                links.append((name, dep))
                 walk(dep, depth + 1)
+            else:
+                links.append((name, dep))
 
     walk(center, 1)
     for user in md.dependents(center)[:MAX_USERS]:
-        links.append((user, center))
+        if (user, center) not in links:
+            links.append((user, center))
         nodes.setdefault(user, -1)
 
     cats = list(md.SOURCES)

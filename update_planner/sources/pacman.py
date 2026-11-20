@@ -144,14 +144,30 @@ def modified_backups(names: list[str]) -> dict[str, list[str]]:
 
 
 def last_upgrade(log: Path = Path('/var/log/pacman.log')) -> str | None:
-    """Zeitpunkt des letzten vollständigen Systemupdates laut pacman.log."""
+    """Zeitpunkt des letzten vollständigen Systemupdates laut pacman.log.
+
+    Liest die Datei blockweise von hinten – das Protokoll wächst über Jahre auf viele MB, der
+    gesuchte Eintrag steht fast immer im letzten Block.
+    """
+    marker = b'starting full system upgrade'
+    block = 256 * 1024
     try:
-        last = None
-        with log.open(errors='replace') as f:
-            for line in f:
-                if 'starting full system upgrade' in line:
-                    last = line[1:20]
-        return last
+        with log.open('rb') as f:
+            pos = f.seek(0, 2)
+            tail = b''
+            while pos > 0:
+                step = min(block, pos)
+                pos -= step
+                f.seek(pos)
+                buf = f.read(step) + tail
+                # die erste (evtl. angeschnittene) Zeile erst mit dem nächsten Block auswerten
+                cut = buf.find(b'\n') if pos > 0 else -1
+                head, body = (buf[:cut + 1], buf[cut + 1:]) if cut >= 0 else (b'', buf)
+                for line in reversed(body.splitlines()):
+                    if marker in line:
+                        return line[1:20].decode(errors='replace')
+                tail = head
+            return None
     except OSError:
         return None
 

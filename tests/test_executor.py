@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+from pathlib import Path
 
 import pytest
 
@@ -10,16 +11,23 @@ from update_planner import config, executor
 SECRET = 'S3cr3t-pw!'  # noqa: S105 – Testwert
 
 
+class FakeStream:
+    """Liefert die Ausgabe in kleinen Stücken – wie eine Pipe, Zeilen können über Stücke hinweg gehen."""
+
+    def __init__(self, data: bytes, chunk: int = 7):
+        self._data, self._chunk = data, chunk
+
+    async def read(self, n=-1):
+        out, self._data = self._data[:min(n, self._chunk)], self._data[min(n, self._chunk):]
+        return out
+
+
 class FakeProc:
     def __init__(self, lines, rc=0):
         self._lines = [l.encode() + b'\n' for l in lines]
         self.returncode = rc
         self.stdin = FakeStdin()
-        self.stdout = self._iter()
-
-    async def _iter(self):
-        for l in self._lines:
-            yield l
+        self.stdout = FakeStream(b''.join(self._lines))
 
     async def wait(self):
         return self.returncode
@@ -110,3 +118,38 @@ def test_failed_pacman_aborts(monkeypatch, calls):
     monkeypatch.setattr(asyncio, 'create_subprocess_exec', failing)
     r = asyncio.run(executor.Runner(executor.Plan(repo=True, flatpak=['a.b']), cbs([]), SECRET, {}).run())
     assert not r.ok and 'Flatpak' not in r.updated
+
+
+def test_long_lines_and_cr_do_not_break_stream(monkeypatch, calls):
+    long = 'x' * 200_000                                   # > 64 KiB: readline() wäre hier gescheitert
+    async def fake(*cmd, **kw):
+        p = FakeProc([])
+        p.stdout = FakeStream((long + '\nfoo\rbar\r\nend').encode(), chunk=65536)
+        return p
+    monkeypatch.setattr(asyncio, 'create_subprocess_exec', fake)
+    log = []
+    r = asyncio.run(executor.Runner(executor.Plan(repo=True, snapshot=False), cbs(log), SECRET, {}).run())
+    assert r.ok
+    assert log[-4:-1] == ['foo', 'bar', 'end'] and len(log[-5]) <= executor.UI_LINE + 2
+    assert long in Path(r.log_file).read_text()            # Protokoll vollständig
+
+
+def test_broken_stdin_pipe_is_not_fatal(monkeypatch, calls):
+    async def fake(*cmd, **kw):
+        p = FakeProc(['sudo: a password is required'], rc=1)
+        async def broken():
+            raise BrokenPipeError
+        p.stdin.drain = broken
+        return p
+    monkeypatch.setattr(asyncio, 'create_subprocess_exec', fake)
+    r = asyncio.run(executor.Runner(executor.Plan(repo=True, snapshot=False), cbs([]), SECRET, {}).run())
+    assert not r.ok and r.errors                            # sauberer Abbruch statt Ausnahme
+
+
+def test_unexpected_error_returns_result(monkeypatch, calls):
+    async def missing(*cmd, **kw):
+        raise FileNotFoundError('snapper')
+    monkeypatch.setattr(asyncio, 'create_subprocess_exec', missing)
+    r = asyncio.run(executor.Runner(executor.Plan(repo=True, snapshot=False), cbs([]), SECRET, {}).run())
+    assert not r.ok and 'FileNotFoundError' in r.errors[0]
+    assert not executor.running()

@@ -26,6 +26,16 @@ from .sysutil import env_c, valid_flatpak, valid_name
 
 SUDO = ['sudo', '-S', '-k', '-p', '']
 AUR_GIT = 'https://aur.archlinux.org/{base}.git'
+READ_CHUNK = 64 * 1024
+MAX_LINE = 1024 * 1024          # längere „Zeilen“ (z. B. Compiler-Ausgaben ohne \n) werden zerteilt
+UI_LINE = 2000                  # in der Oberfläche gekürzt, im Protokoll vollständig
+_LINE_SPLIT = re.compile(rb'\r\n|\r|\n')
+
+_RUNNING = asyncio.Lock()       # nur ein Update-Lauf gleichzeitig – auch über mehrere Fenster hinweg
+
+
+def running() -> bool:
+    return _RUNNING.locked()
 
 
 @dataclass
@@ -73,12 +83,39 @@ class Result:
     duration: float = 0.0
 
 
-async def check_password(password: str) -> bool:
+async def check_password(password: str, timeout: float = 30) -> bool:
     proc = await asyncio.create_subprocess_exec(*SUDO, '-v', stdin=asyncio.subprocess.PIPE,
                                                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
                                                 env=env_c())
-    await proc.communicate((password + '\n').encode())
+    try:
+        await asyncio.wait_for(proc.communicate((password + '\n').encode()), timeout)
+    except (TimeoutError, BrokenPipeError, ConnectionResetError):
+        _terminate(proc)
+        return False
     return proc.returncode == 0
+
+
+def _terminate(proc) -> None:
+    if proc.returncode is None:
+        try:
+            proc.terminate()
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+async def _read_lines(stream):
+    """Zeilen aus einem Prozess-Stream – ohne das 64-KiB-Limit von StreamReader.readline()."""
+    buf = b''
+    while chunk := await stream.read(READ_CHUNK):
+        buf += chunk
+        *lines, buf = _LINE_SPLIT.split(buf)
+        for line in lines:
+            yield line
+        while len(buf) > MAX_LINE:
+            yield buf[:MAX_LINE]
+            buf = buf[MAX_LINE:]
+    if buf:
+        yield buf
 
 
 class Runner:
@@ -100,8 +137,8 @@ class Runner:
     def _log(self, line: str) -> None:
         if self._pw and self._pw in line:          # Paranoia: Passwort nie ausgeben
             line = line.replace(self._pw, '•••')
-        self.cb.log(line)
         self._logfile.write(line + '\n')
+        self.cb.log(line if len(line) <= UI_LINE else line[:UI_LINE] + ' …')
 
     def _enter(self, name: str) -> None:
         self._idx = self._phases.index(name)
@@ -124,42 +161,59 @@ class Runner:
             *full, cwd=str(cwd) if cwd else None, env=env or env_c(),
             stdin=asyncio.subprocess.PIPE if sudo else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-        if sudo:
-            proc.stdin.write(((self._pw or '') + '\n').encode())
-            await proc.stdin.drain()
-            proc.stdin.close()
-        assert proc.stdout
-        async for raw in proc.stdout:
-            line = raw.decode(errors='replace').rstrip()
-            if line:
-                self._log(line)
-                if on_line:
-                    on_line(line)
-        return await proc.wait()
+        try:
+            if sudo:
+                try:
+                    proc.stdin.write(((self._pw or '') + '\n').encode())
+                    await proc.stdin.drain()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass                          # Prozess hat schon beendet – Rückgabewert zählt
+                finally:
+                    proc.stdin.close()
+            assert proc.stdout
+            async for raw in _read_lines(proc.stdout):
+                line = raw.decode(errors='replace').rstrip()
+                if line:
+                    self._log(line)
+                    if on_line:
+                        on_line(line)
+            return await proc.wait()
+        finally:
+            _terminate(proc)                      # bei Abbruch/Fehler keinen Prozess verwaisen lassen
 
     # ---------------------------------------------------------------- Ablauf
     async def run(self) -> Result:
         start = time.time()
         try:
-            await self._prepare()
-            if 'Snapshot' in self._phases:
-                await self._snapshot('pre')
-            if self.plan.repo:
-                await self._repo()
-            if self.plan.aur:
-                await self._aur()
-            if self.plan.flatpak:
-                await self._flatpak()
-            await self._finish()
+            if _RUNNING.locked():
+                raise _Abort(_('Es läuft bereits ein Update'))
+            async with _RUNNING:
+                await self._steps()
         except (_Abort, ValueError) as exc:
             self.result.ok = False
             self.result.errors.append(str(exc))
             self._log(_('!! Abbruch: {err}', err=exc))
+        except Exception as exc:  # noqa: BLE001 – unerwartete Fehler (z. B. fehlendes Programm) melden statt hängen
+            self.result.ok = False
+            self.result.errors.append(f'{type(exc).__name__}: {exc}')
+            self._log(_('!! Abbruch: {err}', err=f'{type(exc).__name__}: {exc}'))
         finally:
             self._pw = None                       # Passwort verwerfen
             self.result.duration = time.time() - start
             self._logfile.close()
         return self.result
+
+    async def _steps(self) -> None:
+        await self._prepare()
+        if 'Snapshot' in self._phases:
+            await self._snapshot('pre')
+        if self.plan.repo:
+            await self._repo()
+        if self.plan.aur:
+            await self._aur()
+        if self.plan.flatpak:
+            await self._flatpak()
+        await self._finish()
 
     async def _prepare(self) -> None:
         self._enter('Vorbereitung')
@@ -168,7 +222,7 @@ class Runner:
             raise _Abort(_('pacman-Datenbank ist gesperrt (/var/lib/pacman/db.lck).'))
         for n in self.plan.hold:
             valid_name(n)
-        self._pacnew_before = set(pacman_src.pacnew_files())
+        self._pacnew_before = set(await asyncio.to_thread(pacman_src.pacnew_files))
         self._progress(1.0)
 
     async def _snapshot(self, kind: str) -> None:
@@ -198,26 +252,26 @@ class Runner:
         self._enter('Repo')
         total = {'n': 0, 'done': 0, 'dl': 0}
         sub = {'Download': 0.0, 'Prüfen': 0.35, 'Installieren': 0.5, 'Hooks': 0.9}
-        state = {'sub': 'Download'}
+        state = {'sub': 'Download', 'shown': ''}
 
         def parse(line: str) -> None:
-            m = re.match(r'^Packages \((\d+)\)', line)
+            m = _RE_TOTAL.match(line)
             if m:
                 total['n'] = int(m.group(1))
             if ':: Retrieving packages' in line:
                 state['sub'] = 'Download'
-            elif re.search(r'checking (keyring|package integrity|for file conflicts|available disk space)', line):
+            elif _RE_CHECK.search(line):
                 state['sub'] = 'Prüfen'
             elif ':: Processing package changes' in line:
                 state['sub'] = 'Installieren'
             elif ':: Running post-transaction hooks' in line:
                 state['sub'] = 'Hooks'
-            if re.search(r'download(ing|ed)', line):
+            if _RE_DL.search(line):
                 total['dl'] += 1
-            m = re.match(r'^\(\s*(\d+)/(\d+)\) (upgrading|installing|reinstalling|downgrading|removing)', line)
+            m = _RE_STEP.match(line)
             if m:
                 total['done'], total['n'] = int(m.group(1)), int(m.group(2))
-            m = re.search(r'warning: (\S+) installed as (\S+\.pacnew)', line)
+            m = _RE_PACNEW.search(line)
             if m:
                 self.result.pacnew.append(m.group(2))
             base = sub[state['sub']]
@@ -225,7 +279,9 @@ class Runner:
             n = max(total['n'], 1)
             inner = total['dl'] / n if state['sub'] == 'Download' else total['done'] / n if state['sub'] == 'Installieren' else 0.5
             self._progress(base + span * min(inner, 1.0))
-            self.cb.phase(f'Repo · {state["sub"]}')
+            if state['shown'] != state['sub']:      # nicht für jede Ausgabezeile neu setzen
+                state['shown'] = state['sub']
+                self.cb.phase(f'Repo · {state["sub"]}')
 
         ignore = ['--ignore', ','.join(self.plan.hold)] if self.plan.hold else []
         if self.plan.dry_run:
@@ -266,6 +322,8 @@ class Runner:
             raise _Skip(_('git clone fehlgeschlagen'))
 
         # Genau das PKGBUILD scannen, das gleich gebaut wird
+        if not (d / 'PKGBUILD').is_file():
+            raise _Skip(_('kein PKGBUILD im AUR-Repository'))
         text = (d / 'PKGBUILD').read_text(errors='replace')
         findings = aur_scanner.scan_text(text, 'PKGBUILD')
         inst = re.search(r'^\s*install=["\']?([\w.+-]+)', text, re.M)
@@ -325,12 +383,19 @@ class Runner:
         self._enter('Abschluss')
         if 'Snapshot' in self._phases and self.result.snapshot:
             await self._snapshot('post')
-        after = set(pacman_src.pacnew_files())
+        after = set(await asyncio.to_thread(pacman_src.pacnew_files))
         self.result.pacnew = sorted(set(self.result.pacnew) | (after - self._pacnew_before))
         kernel = os.uname().release
         self.result.reboot = not self.plan.dry_run and not Path(f'/usr/lib/modules/{kernel}').exists()
         self._log(_(':: Fertig') + (_(' – Neustart erforderlich (Kernel ersetzt)') if self.result.reboot else ''))
         self._progress(1.0)
+
+
+_RE_TOTAL = re.compile(r'^Packages \((\d+)\)')
+_RE_CHECK = re.compile(r'checking (keyring|package integrity|for file conflicts|available disk space)')
+_RE_DL = re.compile(r'download(ing|ed)')
+_RE_STEP = re.compile(r'^\(\s*(\d+)/(\d+)\) (upgrading|installing|reinstalling|downgrading|removing)')
+_RE_PACNEW = re.compile(r'warning: (\S+) installed as (\S+\.pacnew)')
 
 
 class _Abort(Exception):

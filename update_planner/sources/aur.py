@@ -85,37 +85,40 @@ def _old_file(base: str, file: str) -> str:
     return ''
 
 
-async def files(base: str) -> dict[str, tuple[str, str]]:
+async def files(base: str, client: httpx.AsyncClient | None = None) -> dict[str, tuple[str, str]]:
     """{Datei: (alt, neu)} für PKGBUILD und ggf. .install – neu direkt aus dem AUR."""
     valid_name(base)
-    async with _client() as client:
-        new_pkgbuild = (await fetch(CGIT.format(file='PKGBUILD', base=quote(base)), ttl=600,
-                                    client=client)).decode(errors='replace')[:MAX_FILE]
-        out = {'PKGBUILD': (_old_file(base, 'PKGBUILD'), new_pkgbuild)}
-        inst = _install_name(new_pkgbuild)
-        if inst:
-            try:
-                text = (await fetch(CGIT.format(file=quote(inst), base=quote(base)), ttl=600,
-                                    client=client)).decode(errors='replace')[:MAX_FILE]
-                out[inst] = (_old_file(base, inst), text)
-            except httpx.HTTPError:
-                pass
+    if client is None:
+        async with _client() as own:
+            return await files(base, own)
+    new_pkgbuild = (await fetch(CGIT.format(file='PKGBUILD', base=quote(base)), ttl=600,
+                                client=client)).decode(errors='replace')[:MAX_FILE]
+    out = {'PKGBUILD': (await asyncio.to_thread(_old_file, base, 'PKGBUILD'), new_pkgbuild)}
+    inst = _install_name(new_pkgbuild)
+    if inst:
+        try:
+            text = (await fetch(CGIT.format(file=quote(inst), base=quote(base)), ttl=600,
+                                client=client)).decode(errors='replace')[:MAX_FILE]
+            out[inst] = (await asyncio.to_thread(_old_file, base, inst), text)
+        except httpx.HTTPError:
+            pass
     return out
 
 
 async def scan_inputs(names: list[str]) -> dict[str, dict]:
-    """Metadaten + Dateien je Paket, parallel (max. 6 gleichzeitig)."""
+    """Metadaten + Dateien je Paket, parallel (max. 6 gleichzeitig, eine gemeinsame HTTP-Verbindung)."""
     rpc = await info(names)
     sem = asyncio.Semaphore(6)
 
-    async def one(name: str):
-        r = rpc.get(name)
-        if not r:
-            return name, None
-        meta = meta_from_rpc(r)
-        async with sem:
-            meta['files'] = await files(meta['base'])
-        return name, meta
+    async with _client() as client:
+        async def one(name: str):
+            r = rpc.get(name)
+            if not r:
+                return name, None
+            meta = meta_from_rpc(r)
+            async with sem:
+                meta['files'] = await files(meta['base'], client)
+            return name, meta
 
-    pairs = await asyncio.gather(*(one(n) for n in names), return_exceptions=True)
+        pairs = await asyncio.gather(*(one(n) for n in names), return_exceptions=True)
     return {n: m for p in pairs if not isinstance(p, BaseException) for n, m in [p] if m}

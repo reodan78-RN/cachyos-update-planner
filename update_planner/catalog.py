@@ -106,19 +106,30 @@ def load_demo() -> None:
 
 # ------------------------------------------------------------------ echter Systemstand
 
+_pending = False
+
+
 async def refresh() -> None:
+    """Neuen Systemstand laden. Läuft bereits eine Prüfung, wird genau eine weitere nachgeholt –
+    so geht z. B. die Aktualisierung nach einem Update-Lauf nicht verloren."""
+    global _pending
     if STATUS.get('demo'):
         return
     if _lock.locked():
+        _pending = True
         return
     async with _lock:
-        STATUS.update(state='loading', warnings=[])
-        try:
-            _publish(await _collect())
-            STATUS.update(state='ready', step='', loaded_at=time.time())
-        except Exception as exc:  # noqa: BLE001 – Fehler sichtbar machen statt die App zu beenden
-            log.exception('Systemstand konnte nicht geladen werden')
-            STATUS.update(state='error', step=str(exc)[:300])
+        while True:
+            _pending = False
+            STATUS.update(state='loading', warnings=[])
+            try:
+                _publish(await _collect())
+                STATUS.update(state='ready', step='', loaded_at=time.time())
+            except Exception as exc:  # noqa: BLE001 – Fehler sichtbar machen statt die App zu beenden
+                log.exception('Systemstand konnte nicht geladen werden')
+                STATUS.update(state='error', step=str(exc)[:300])
+            if not _pending:
+                break
 
 
 def _step(text: str) -> None:
@@ -134,7 +145,8 @@ async def _collect() -> dict:
     _step(_('Installierte Pakete lesen …'))
     inst = await asyncio.to_thread(pacman.installed)
     sysinfo = await asyncio.to_thread(system.info)
-    sysinfo['last_upgrade'] = pacman.last_upgrade()
+    # pacman.log kann viele MB groß sein – nicht im Event-Loop lesen
+    sysinfo['last_upgrade'] = await asyncio.to_thread(pacman.last_upgrade)
     sysinfo['pacnew'] = await asyncio.to_thread(pacman.pacnew_files)
     sysinfo['db_locked'] = pacman.db_locked()
 
@@ -146,8 +158,12 @@ async def _collect() -> dict:
         repo_updates = []
 
     _step(_('Flatpak prüfen …'))
-    fp_items = await asyncio.to_thread(flatpak.installed)
-    fp_updates = await asyncio.to_thread(flatpak.updates)
+    try:
+        fp_items, fp_updates = await asyncio.gather(asyncio.to_thread(flatpak.installed),
+                                                    asyncio.to_thread(flatpak.updates))
+    except Exception as exc:  # noqa: BLE001 – Flatpak darf den Rest nicht blockieren
+        _warn(_('Flatpak nicht prüfbar: {err}', err=exc))
+        fp_items, fp_updates = [], []
 
     foreign = {n: p.version for n, p in inst.items() if p.repo == 'aur'}
     aur_updates, aur_missing, rpc = [], [], {}
@@ -169,7 +185,11 @@ async def _collect() -> dict:
         cves = []
 
     _step(_('News laden …'))
-    news_items = await news.items()
+    try:
+        news_items = await news.items()
+    except Exception as exc:  # noqa: BLE001
+        log.warning('News nicht ladbar: %s', exc)
+        news_items = []
     last = sysinfo['last_upgrade'] or ''
     for n in news_items:
         n['new'] = bool(last) and n['date'] >= last[:10]
@@ -212,7 +232,11 @@ def _assemble(inst, repo_updates, fp_items, fp_updates, aur_updates, aur_missing
 
     # --- Bewertungsgrundlagen
     groups, _needs = analysis.together_groups(inst, repo_updates)
-    backups = pacman.modified_backups([u.name for u in repo_updates]) if repo_updates else {}
+    try:
+        backups = pacman.modified_backups([u.name for u in repo_updates]) if repo_updates else {}
+    except Exception as exc:  # noqa: BLE001 – nur ein Bewertungsdetail, darf den Stand nicht verhindern
+        log.warning('Backup-Dateien nicht lesbar: %s', exc)
+        backups = {}
     fixes: dict[str, list[str]] = {}
     for c in cves:
         if c['status'] == 'behoben durch Update':

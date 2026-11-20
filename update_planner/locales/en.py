@@ -307,7 +307,9 @@ MESSAGES: dict[str, str] = {
     # ------------------------------------------------------------------ loading steps and warnings
     'Installierte Pakete lesen …': 'Reading installed packages …',
     'Repo-Updates prüfen (checkupdates) …': 'Checking repo updates (checkupdates) …',
+    'kein PKGBUILD im AUR-Repository': 'no PKGBUILD in the AUR repository',
     'Repo-Updates nicht prüfbar: {err}': 'Cannot check repo updates: {err}',
+    'Flatpak nicht prüfbar: {err}': 'Cannot check Flatpak: {err}',
     'Flatpak prüfen …': 'Checking Flatpak …',
     'AUR prüfen …': 'Checking AUR …',
     'Sicherheitsdatenbank laden …': 'Loading security database …',

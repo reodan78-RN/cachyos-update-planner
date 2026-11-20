@@ -126,16 +126,22 @@ async def password_dialog() -> str | None:
         pw = ui.input(_('Passwort'), password=True, password_toggle_button=True).classes('w-full') \
             .props('outlined autofocus autocomplete=off')
         error = ui.label('').classes('text-negative text-sm')
-        tries = {'n': 0}
+        tries = {'n': 0, 'checking': False}
 
         async def ok():
+            if tries['checking']:                 # Enter + Klick dürfen nicht zwei sudo-Prüfungen starten
+                return
             value = pw.value or ''
             if not value:
                 error.text = _('Bitte Passwort eingeben')
                 return
+            tries['checking'] = True
             btn.props('loading')
-            valid = await executor.check_password(value)
-            btn.props(remove='loading')
+            try:
+                valid = await executor.check_password(value)
+            finally:
+                tries['checking'] = False
+                btn.props(remove='loading')
             if valid:
                 pw.value = ''
                 dialog.submit(value)
@@ -210,9 +216,14 @@ async def progress_dialog(plan: executor.Plan, password: str | None, notes: list
     async def ask(t: str, text: str, yes: str, no: str) -> bool:
         return await confirm(t, text, yes=yes, no=no, icon='gpp_bad')
 
-    runner = executor.Runner(plan, executor.Callbacks(on_phase, on_progress, log.push, ask), password, md.SYSTEM)
-    password = None
-    result = await runner.run()
+    try:
+        runner = executor.Runner(plan, executor.Callbacks(on_phase, on_progress, log.push, ask), password, md.SYSTEM)
+    except Exception as exc:  # noqa: BLE001 – sonst bliebe der persistente Dialog für immer offen
+        result = executor.Result(ok=False, errors=[str(exc)])
+        log.push(_('!! Abbruch: {err}', err=exc))
+    else:
+        password = None
+        result = await runner.run()
 
     spinner.set_visibility(False)
     if current['p']:
@@ -233,7 +244,7 @@ async def progress_dialog(plan: executor.Plan, password: str | None, notes: list
 
 
 async def start_update(state: State) -> None:
-    if state.busy:
+    if state.busy or executor.running():          # auch Läufe aus anderen Fenstern/Tabs
         ui.notify(_('Es läuft bereits ein Update'), type='warning')
         return
     if not md.ready():
@@ -255,9 +266,10 @@ async def start_update(state: State) -> None:
             return
     state.busy = True
     try:
-        result = await progress_dialog(plan, password, notes)
+        await progress_dialog(plan, password, notes)
     finally:
         password = None
         state.busy = False
-    if not plan.dry_run and result.ok:
+    if not plan.dry_run:
+        # auch nach Abbruch/Teilerfolg neu laden – sonst zeigt die Oberfläche bereits installierte Updates weiter an
         background_tasks.create(md.refresh(), name='refresh-after-update')

@@ -66,13 +66,82 @@ async def run_async(cmd: Sequence[str], **kw) -> str:
     return await asyncio.to_thread(run, cmd, **kw)
 
 
-@lru_cache(maxsize=8192)
-def vercmp(a: str, b: str) -> int:
-    """pacman-Versionsvergleich (<0, 0, >0) über das Original-Werkzeug."""
+def _isdigit(c: str) -> bool:
+    return '0' <= c <= '9'
+
+
+def _isalpha(c: str) -> bool:
+    return 'a' <= c <= 'z' or 'A' <= c <= 'Z'
+
+
+def _rpmvercmp(a: str, b: str) -> int:
+    """Segmentvergleich wie rpmvercmp() in libalpm (C-Locale, nur ASCII)."""
     if a == b:
         return 0
-    out = run(['vercmp', a, b], timeout=10)
-    return int(out.strip())
+    i = j = 0          # Position im aktuellen Segment
+    p1 = p2 = 0        # Ende des vorherigen Segments
+    la, lb = len(a), len(b)
+    while i < la and j < lb:
+        while i < la and not (_isdigit(a[i]) or _isalpha(a[i])):
+            i += 1
+        while j < lb and not (_isdigit(b[j]) or _isalpha(b[j])):
+            j += 1
+        if i >= la or j >= lb:
+            break
+        if i - p1 != j - p2:                    # unterschiedlich lange Trennzeichen
+            return -1 if i - p1 < j - p2 else 1
+        p1, p2 = i, j
+        isnum = _isdigit(a[p1])
+        same = _isdigit if isnum else _isalpha
+        while p1 < la and same(a[p1]):
+            p1 += 1
+        while p2 < lb and same(b[p2]):
+            p2 += 1
+        s1, s2 = a[i:p1], b[j:p2]
+        if not s2:                              # Segmenttypen verschieden
+            return 1 if isnum else -1
+        if isnum:
+            s1, s2 = s1.lstrip('0'), s2.lstrip('0')
+            if len(s1) != len(s2):
+                return 1 if len(s1) > len(s2) else -1
+        if s1 != s2:
+            return -1 if s1 < s2 else 1
+        i, j = p1, p2
+    if i >= la and j >= lb:
+        return 0
+    # ein übrig gebliebenes Alpha-Segment verliert gegen einen leeren Rest (1.0a < 1.0)
+    if (i >= la and not (j < lb and _isalpha(b[j]))) or (i < la and _isalpha(a[i])):
+        return -1
+    return 1
+
+
+def _parse_evr(evr: str) -> tuple[str, str, str | None]:
+    k = 0
+    while k < len(evr) and _isdigit(evr[k]):
+        k += 1
+    if k < len(evr) and evr[k] == ':':
+        epoch, rest = evr[:k] or '0', evr[k + 1:]
+    else:
+        epoch, rest = '0', evr
+    version, sep, release = rest.rpartition('-')
+    return (epoch, version, release) if sep else (epoch, rest, None)
+
+
+@lru_cache(maxsize=16384)
+def vercmp(a: str, b: str) -> int:
+    """pacman-Versionsvergleich (<0, 0, >0) – Portierung von alpm_pkg_vercmp().
+
+    Früher wurde pro Vergleich das Werkzeug `vercmp` gestartet; beim Abgleich mit dem Security
+    Tracker waren das Tausende Prozesse pro Aktualisierung.
+    """
+    if a == b:
+        return 0
+    e1, v1, r1 = _parse_evr(a)
+    e2, v2, r2 = _parse_evr(b)
+    ret = _rpmvercmp(e1, e2) or _rpmvercmp(v1, v2)
+    if ret == 0 and r1 is not None and r2 is not None:
+        ret = _rpmvercmp(r1, r2)
+    return ret
 
 
 def version_parts(version: str) -> tuple[int, list[int]]:

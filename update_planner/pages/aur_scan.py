@@ -92,7 +92,7 @@ def page() -> None:
     def content() -> None:
         visible = 'aur' in s.sources
         results = sorted((r for r in md.SCANS.values() if r), key=lambda r: -r.score)
-        if results and current['name'] not in md.SCANS:
+        if results and not md.SCANS.get(current['name']):  # auch None-Einträge (Scan ohne Metadaten)
             current['name'] = results[0].package
 
         with ui.row().classes('w-full items-end justify-between'):
@@ -125,12 +125,17 @@ def page() -> None:
             bar.value = 0.3
             try:
                 if not md.STATUS.get('demo'):
-                    md.AUR_META.update(await aur_src.scan_inputs(list(md.AUR_META)))
+                    fresh = await aur_src.scan_inputs(list(md.AUR_META))
+                    for name, meta in fresh.items():   # Markierung „nur geprüft“ erhalten
+                        if md.AUR_META.get(name, {}).get('lookup'):
+                            meta['lookup'] = True
+                    md.AUR_META.update(fresh)
                 md.SCANS.update(sc.scan_all(md.AUR_META))
                 ui.notify(_('{n} AUR-Pakete geprüft', n=len(md.AUR_META)), type='positive', position='top-right')
             except Exception as exc:  # noqa: BLE001
                 ui.notify(_('Scan fehlgeschlagen: {err}', err=exc), type='negative', position='top-right')
-            rescan_btn.props(remove='loading')
+            finally:
+                rescan_btn.props(remove='loading')
             content.refresh()
         rescan_btn.on_click(rescan)
 

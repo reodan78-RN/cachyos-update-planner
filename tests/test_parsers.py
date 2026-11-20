@@ -86,3 +86,26 @@ def test_flatpak_size_parse():
     assert catalog._parse_size('192.5\xa0kB') == pytest.approx(192.5 / 1024)
     assert catalog._parse_size('1,5 GB') == pytest.approx(1536)
     assert catalog._parse_size('') == 0
+
+
+def test_vercmp_matches_libalpm_rules():
+    # Erwartungswerte mit /usr/bin/vercmp (pacman) ermittelt
+    cases = [('1.0', '1.0', 0), ('1.0a', '1.0', -1), ('1.0', '1.0.a', -1), ('1.0rc1', '1.0', -1),
+             ('1.0-2', '1.0-10', -1), ('1.0', '1.0-5', 0), ('2:1.0', '1:9.9', 1), (':1.0', '0:1.0', 0),
+             ('1.00', '1.0', 0), ('1..0', '1.0', 1), ('1.0.1', '1.0a', 1), ('r123.abc', 'r124.abc', -1),
+             ('6.17.10-1', '6.17.7-1', 1), ('1.0~rc1', '1.0', 1), ('1_0', '1.0', 0)]
+    for a, b, want in cases:
+        assert vercmp(a, b) == want, (a, b)
+        assert vercmp(b, a) == -want, (b, a)
+
+
+def test_last_upgrade_reads_from_end(tmp_path):
+    from update_planner.sources import pacman
+    log = tmp_path / 'pacman.log'
+    filler = '[2020-01-01T00:00:00+0100] [ALPM] upgraded foo (1-1 -> 2-1)\n' * 20000   # > 1 MB, mehrere Blöcke
+    log.write_text('[2024-05-01T10:00:00+0200] [PACMAN] starting full system upgrade\n' + filler
+                   + '[2026-11-10T08:12:00+0100] [PACMAN] starting full system upgrade\n' + filler)
+    assert pacman.last_upgrade(log) == '2026-11-10T08:12:00'
+    log.write_text(filler)
+    assert pacman.last_upgrade(log) is None
+    assert pacman.last_upgrade(tmp_path / 'fehlt.log') is None
