@@ -7,7 +7,8 @@ update_planner/
 ├── analysis.py       risk score, "update together" groups, foreign rebuilds
 ├── aur_scanner.py    static PKGBUILD/.install analysis, diff
 ├── executor.py       update run (sudo, makepkg, flatpak), dry run, log
-├── dialogs.py        context, password, confirmation and progress dialogs
+├── dialogs.py        context, password, confirmation, progress, install and "update due" dialogs
+├── scheduler.py      scheduled update: time calculation, schedule.json, claim/release between windows
 ├── state.py          per-window state (selection, filters, reviewed packages)
 ├── theme.py          glass design, light/dark
 ├── i18n.py           language detection and _() translation function
@@ -20,9 +21,10 @@ update_planner/
 │   ├── aur.py        AUR RPC v5, PKGBUILD/.install from aur.archlinux.org, paru/yay caches
 │   ├── flatpak.py    flatpak list / remote-ls
 │   ├── security.py   Arch Linux Security Tracker
+│   ├── discover.py   candidates for new packages: pacman -Sl/-Ss, pkgstats, AUR RPC search, Flathub API
 │   ├── news.py       Arch and CachyOS RSS
 │   └── system.py     kernel, file system, snapper/snap-pac, free space, pending reboot
-├── pages/            overview, packages, updates, conflicts, security, aur_scan
+├── pages/            overview, packages, install, updates, conflicts, security, aur_scan
 ├── mockdata.py, aur_samples.py   demo data (--demo, tests)
 └── static/icon.png
 ```
@@ -52,6 +54,27 @@ two or more packages become "update together" groups; holding back any member ho
 `executor.Runner` executes a `Plan` (repo yes/no and held packages, AUR packages, Flatpak IDs, snapshot, dry
 run). Phases: Preparation → Snapshot → Repo → AUR → Flatpak → Finish. Progress is derived from pacman's output
 (`Packages (n)`, `(i/n) upgrading …`, phase markers). Details on privileges are in [security.md](security.md).
+
+## Installing new packages
+
+`sources/discover.py` returns candidates in one format (`name, source, repo, version, desc, popularity,
+pop_label, votes, flags, base, origin, sec`). Repo candidates come from `pacman -Sl/-Ss --dbpath` on the private
+checkupdates copy (so they match what `-Syu` will install); popularity from pkgstats (five pages of 10 000, cached
+for 24 h); AUR from RPC `search/<term>?by=name-desc`; Flatpak from Flathub's `collection/popular` and `POST /search`.
+`annotate_security()` reuses `security.relevant()` with the raw tracker data (`catalog.ADVISORIES`) for the
+*available* version of each repo candidate.
+
+`Plan` gained `install` (repo, run as `pacman -Syu --needed`), `install_aur` (subset of `aur` to be installed
+rather than updated – the build step then selects exactly the requested package), `flatpak_install` and
+`flatpak_user`. `dialogs.start_install()` mirrors `start_update()`.
+
+## Scheduled updates
+
+`scheduler.py` keeps at most one `Schedule` (time, options, deselected updates, sources, reviewed packages) in
+memory and in `schedule.json`. The `poll()` timer in `app.root()` compares the wall clock with it; the window that
+`claim()`s the plan runs `dialogs.run_scheduled()` (notification, due dialog, reload, selection =
+`default_selection() − deselected`, password dialog, progress dialog) and `release()`s on disconnect. Dialogs are
+attached to the page layout so a page rebuild after a new system state does not close them.
 
 ## Translations
 
@@ -84,8 +107,9 @@ differ; `tests/test_i18n_ui.py` fails when a UI element receives an untranslated
 | File | Covers |
 |---|---|
 | `test_scanner.py` | scanner rules, scoping, scoring, diff, maintainer change |
-| `test_parsers.py` | pacman output, versions, name validation, tracker matching, news, sizes |
+| `test_parsers.py` | pacman output, versions, name validation, tracker matching, news, sizes, install-candidate parsers (pacman -Sl/-Ss, pkgstats, AUR, Flathub), search-term restrictions, candidate security |
+| `test_scheduler.py` | time calculation (1 h, 2 h, clock time, past), persistence without secrets, claim/release, deselected logic |
 | `test_analysis.py` | update-together groups, soname links, split packages, foreign rebuilds, risk reasons |
-| `test_executor.py` | update run with a fake process start: password only via stdin, dry run never uses sudo, aborts |
+| `test_executor.py` | update run with a fake process start: password only via stdin, dry run never uses sudo, aborts; install plans (`pacman -Syu --needed`, name validation, AUR new install, Flatpak arguments) |
 | `test_hardening.py` | session secret, C locale, download size limit, server smoke test bound to 127.0.0.1 |
 | `test_i18n.py`, `test_i18n_ui.py` | catalog completeness, placeholders, language detection, no raw UI literals |

@@ -74,6 +74,7 @@ def page() -> None:
         cves = md.CVES
         top = max(updates, key=lambda u: u['risk']) if updates else None
         severe = sum(1 for c in cves if c['severity'] in ('kritisch', 'hoch'))
+        closed = sum(1 for c in cves if c['status'] == 'behoben durch Update')
         days = _days_since(md.SYSTEM.get('last_upgrade'))
         mib = sum(u['size'] for u in updates)
 
@@ -86,9 +87,10 @@ def page() -> None:
                          theme.GREEN if not updates else theme.BLUE, _('{mib} MiB Download', mib=f'{mib:.0f}'))
             single_value(_('Höchstes Risiko'), top['risk'] if top else 0, theme.threshold(top['risk'] if top else 0),
                          top['name'] if top else _('keine Updates'))
-            single_value(_('Sicherheitslücken'), len(cves),
+            single_value(_('Sicherheitslücken instl. Pakete'), len(cves),
                          theme.RED if severe else theme.YELLOW if cves else theme.GREEN,
-                         _('{n} davon hoch oder kritisch', n=severe))
+                         _('{n} davon hoch oder kritisch', n=severe),
+                         _('{n} davon mit Update geschlossen', n=closed), theme.GREEN if closed else None)
             single_value(_('Tage seit Systemupdate'), days if days is not None else '–',
                          theme.GREEN if days is not None and days < 7 else theme.YELLOW if days is not None and days < 21
                          else theme.RED, (md.SYSTEM.get('last_upgrade') or '')[:10])

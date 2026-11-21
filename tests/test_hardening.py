@@ -78,3 +78,79 @@ def test_server_smoke_demo_localhost_only(tmp_path):
     finally:
         proc.terminate()
         proc.wait(10)
+
+
+# ------------------------------------------------------------------ netguard: lokaler Webserver
+
+from update_planner import netguard  # noqa: E402
+
+
+def _scope(host='127.0.0.1:8765', origin=None, kind='http', client=('127.0.0.1', 50000)):
+    headers = [(b'host', host.encode())] + ([(b'origin', origin.encode())] if origin else [])
+    return {'type': kind, 'headers': headers, 'client': client, 'server': ('127.0.0.1', 8765)}
+
+
+async def _call(mw, scope):
+    sent, reached = [], []
+
+    async def app(scope_, receive, send):
+        reached.append(True)
+
+    async def send(msg):
+        sent.append(msg)
+    await netguard.LocalOnlyMiddleware(app, uid=1000, lookup=mw)(scope, None, send)
+    return sent, bool(reached)
+
+
+@pytest.mark.parametrize('kwargs, allowed', [
+    ({}, True),
+    ({'host': 'localhost:8765', 'origin': 'http://localhost:8765'}, True),
+    ({'host': '[::1]:8765', 'origin': 'http://[::1]:8765'}, True),
+    ({'host': 'evil.example:8765'}, False),                              # DNS-Rebinding
+    ({'host': '127.0.0.1.evil.example'}, False),
+    ({'origin': 'https://evil.example'}, False),                         # fremde Webseite → Socket.IO
+    ({'origin': 'http://127.0.0.1:9999'}, False),                        # anderer lokaler Dienst/Port
+    ({'origin': 'null'}, False),
+    ({'kind': 'websocket', 'origin': 'https://evil.example'}, False),
+    ({'kind': 'websocket'}, True),
+])
+def test_netguard_host_and_origin(kwargs, allowed):
+    sent, reached = asyncio.run(_call(lambda c, s: 1000, _scope(**kwargs)))
+    assert reached is allowed
+    if not allowed:
+        assert sent[0]['type'] in ('http.response.start', 'websocket.close')
+        assert sent[0].get('status', 403) == 403 or sent[0].get('code') == 1008
+
+
+def test_netguard_rejects_other_users_and_unknown_peers():
+    assert asyncio.run(_call(lambda c, s: 1001, _scope()))[1] is False        # anderer Benutzer
+    assert asyncio.run(_call(lambda c, s: None, _scope()))[1] is False        # nicht ermittelbar → ablehnen
+    assert asyncio.run(_call(lambda c, s: 1000, _scope(kind='lifespan')))[1] is True   # Lifespan unberührt
+
+
+def test_peer_uid_reads_proc_table(tmp_path):
+    table = tmp_path / 'tcp'
+    table.write_text('  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n'
+                     '   0: 0100007F:C350 0100007F:2231 01 00000000:00000000 00:00000000 00000000  1001        0 1 1 0\n'
+                     '   1: 0100007F:2231 0100007F:C350 01 00000000:00000000 00:00000000 00000000  1000        0 2 1 0\n')
+    # Client-Socket 127.0.0.1:50000 (0xC350) → Server 8753 (0x2231): gehört Benutzer 1001
+    assert netguard.peer_uid(('127.0.0.1', 50000), ('127.0.0.1', 8753), (str(table),)) == 1001
+    assert netguard.peer_uid(('127.0.0.1', 1), ('127.0.0.1', 8753), (str(table),)) is None
+    assert netguard.peer_uid(None, None) is None
+
+
+def test_https_client_refuses_redirect_to_http():
+    import httpx
+
+    def handler(request):
+        if request.url.scheme == 'https':
+            return httpx.Response(302, headers={'location': 'http://example.org/x'})
+        return httpx.Response(200, content=b'ok')
+
+    async def go():
+        client = sysutil.https_client()
+        client._transport = httpx.MockTransport(handler)
+        async with client:
+            await client.get('https://example.org/')
+    with pytest.raises(sysutil.CommandError):
+        asyncio.run(go())

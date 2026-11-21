@@ -181,13 +181,16 @@ def card(classes: str = ''):
     return ui.column().classes(f'panel p-3 gap-2 {classes}').style('padding:12px !important')
 
 
-def single_value(label: str, value, color: str | None = None, caption: str | None = None) -> None:
+def single_value(label: str, value, color: str | None = None, caption: str | None = None,
+                 caption2: str | None = None, caption2_color: str | None = None) -> None:
     with ui.column().classes('panel'):
         with ui.column().classes('sv gap-0'):
             ui.label(label).classes('sv-label')
             ui.label(str(value)).classes('sv-value').style(f'color:{color}' if color else '')
             if caption:
                 ui.label(caption).classes('sv-caption')
+            if caption2:
+                ui.label(caption2).classes('sv-caption').style(f'color:{caption2_color}' if caption2_color else '')
 
 
 def badge(text: str, color: str) -> None:

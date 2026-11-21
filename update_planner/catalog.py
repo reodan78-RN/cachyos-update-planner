@@ -14,7 +14,7 @@ from datetime import datetime
 
 from . import analysis, aur_scanner
 from .i18n import _
-from .sources import aur, flatpak, news, pacman, security, system
+from .sources import aur, discover, flatpak, news, pacman, security, system
 
 log = logging.getLogger(__name__)
 
@@ -28,6 +28,7 @@ PACKAGES: list[dict] = []
 UPDATES: list[dict] = []
 CONFLICTS: list[dict] = []
 CVES: list[dict] = []
+ADVISORIES: list[dict] = []           # Rohdaten des Security Trackers (für Kandidaten neuer Pakete)
 NEWS: list[dict] = []
 SCANS: dict = {}
 AUR_META: dict[str, dict] = {}
@@ -82,11 +83,13 @@ def ready() -> bool:
 
 
 def _publish(data: dict) -> None:
-    global PACKAGES, UPDATES, CONFLICTS, CVES, NEWS, SCANS, AUR_META, GROUPS, SYSTEM, VERSION
+    global PACKAGES, UPDATES, CONFLICTS, CVES, NEWS, SCANS, AUR_META, GROUPS, SYSTEM, ADVISORIES, VERSION
     global _index, _upd_index, _dependents, _vuln_index
     PACKAGES, UPDATES, CONFLICTS = data['packages'], data['updates'], data['conflicts']
     CVES, NEWS, SCANS, AUR_META = data['cves'], data['news'], data['scans'], data['aur_meta']
     GROUPS, SYSTEM = data['groups'], data['system']
+    ADVISORIES = data.get('advisories', [])
+    discover.set_advisories(ADVISORIES)
     _index = {p['name']: p for p in PACKAGES}
     _upd_index = {u['name']: u for u in UPDATES}
     vuln: dict[str, dict] = {}
@@ -109,7 +112,9 @@ def _publish(data: dict) -> None:
 
 def load_demo() -> None:
     from . import aur_samples, mockdata
+    discover.DEMO = True
     _publish(dict(
+        advisories=mockdata.ADVISORIES,
         packages=mockdata.PACKAGES, updates=mockdata.UPDATES, conflicts=mockdata.CONFLICTS,
         cves=[_demo_cve(c) for c in mockdata.CVES],
         news=[dict(n, source='Demo', link='', new=True) for n in mockdata.NEWS],
@@ -223,6 +228,7 @@ async def _collect() -> dict:
 
     _step(_('Sicherheitsdatenbank laden …'))
     upd_versions = {u.name: u.new for u in repo_updates} | {u['name']: u['new'] for u in aur_updates}
+    groups: list[dict] = []
     try:
         groups = await security.advisories()
         cves = await asyncio.to_thread(security.relevant, groups, {n: p.version for n, p in inst.items()}, upd_versions)
@@ -255,8 +261,10 @@ async def _collect() -> dict:
             _warn(_('AUR-Scan unvollständig: {err}', err=exc))
 
     _step(_('Bewerten …'))
-    return await asyncio.to_thread(_assemble, inst, repo_updates, fp_items, fp_updates, aur_updates, aur_missing,
+    data = await asyncio.to_thread(_assemble, inst, repo_updates, fp_items, fp_updates, aur_updates, aur_missing,
                                    rpc, cves, news_items, aur_meta, scans, sysinfo)
+    data['advisories'] = groups
+    return data
 
 
 def _assemble(inst, repo_updates, fp_items, fp_updates, aur_updates, aur_missing, rpc, cves, news_items,

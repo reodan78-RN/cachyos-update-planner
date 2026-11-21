@@ -41,6 +41,28 @@ def updates() -> list[dict]:
     return [dict(id=r[0], new=r[1] or r[2], branch=r[2], origin=r[3], download=r[4]) for r in rows]
 
 
+def parse_remote_scopes(text: str, name: str) -> set[str]:
+    """`flatpak remotes --columns=name,options`: in welchen Bereichen („user“, „system“) ist `name` aktiv eingerichtet."""
+    scopes: set[str] = set()
+    for line in text.splitlines():
+        f = line.split('\t')
+        opts = set(f[1].replace(',', ' ').split()) if len(f) > 1 else set()
+        if f and f[0] == name and 'disabled' not in opts:
+            scopes |= opts & {'user', 'system'}
+    return scopes
+
+
+def remote_scopes(name: str = 'flathub') -> set[str]:
+    """Bereiche, in denen der Remote existiert. Ohne Remote im gewählten Bereich behandelt `flatpak install` den
+    Remote-Namen als App-Suchbegriff – daher vorher prüfen, ob --user oder --system möglich ist."""
+    if not have('flatpak'):
+        return set()
+    try:
+        return parse_remote_scopes(run(['flatpak', 'remotes', '--columns=name,options'], timeout=30), name)
+    except (CommandError, OSError):
+        return set()
+
+
 def unused_runtimes(items: list[dict]) -> list[str]:
     used = {i['runtime'] for i in items if i['kind'] == 'app'}
     return [i['id'] for i in items if i['kind'] == 'runtime' and i['id'] not in used

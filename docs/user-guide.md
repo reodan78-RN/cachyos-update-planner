@@ -6,7 +6,10 @@ The planner is laid out like a monitoring dashboard:
 
 - **System bar** (top, dark): logo, the source filter (Repo, AUR, Flatpak), the time of the last check,
   *Check for updates* and the theme switch (dark → light → system). Dark is the default.
-- **App navigation** (below): Overview, Packages, Updates, Conflicts, Security, AUR Scanner.
+- **App navigation** (below): Overview, Packages (menu: *Installed*, *Install*), Updates, Conflicts, Security,
+  AUR Scanner.
+- **Scheduled update:** when an update is scheduled, a chip *Update scheduled HH:MM* appears in the system bar;
+  the × cancels the plan.
 - **Dashboards:** each page starts with a title and a short description, followed by single values, charts,
   tables and flat panels. Colors carry meaning only: green, yellow, orange and red follow thresholds and severities.
 
@@ -16,8 +19,8 @@ ready. *Check for updates* reloads everything.
 ## Overview
 
 - **Single values:** installed packages, pending updates with download size, the highest risk score, known
-  vulnerabilities (how many are high or critical) and the time since the last full system update. Each value is
-  colored by threshold.
+  vulnerabilities in installed packages (how many are high or critical, and how many an update closes) and the
+  time since the last full system update. Each value is colored by threshold.
 - **Package changes per day:** upgraded, installed and removed packages over the last 60 days, read from
   `/var/log/pacman.log`.
 - **Risk of pending updates:** how many updates are low, medium or high risk.
@@ -35,6 +38,33 @@ The **Security** column marks every package listed in the Arch Linux Security Tr
 (critical, high, medium, low), plus the number of entries when there is more than one. Sort by this column or tick
 *Affected only*. In the graph, affected packages get a solid ring in the severity color; a dashed red ring marks a
 potential incompatibility and a dotted green ring an available update.
+
+## Install new packages
+
+*Packages → Install* searches for software you do not have yet.
+
+- **Source:** CachyOS/Arch repos, AUR or Flatpak (Flathub). The repo list shows where a package comes from
+  (*CachyOS* for the `cachyos*` repos, otherwise *Arch*).
+- **Search:** by name or keyword (also in descriptions); several words must all match. Without a term the 50
+  most popular repo and Flatpak packages are shown. Installed packages are hidden in every source. The AUR needs at
+  least two characters (it has no full list); the AUR is searched for the longest word and the other words are
+  matched locally.
+- **Popularity:** repo packages show the pkgstats share of reporting systems, AUR packages the AUR popularity and
+  votes, Flatpak apps the installs of the last month. Sorting works within one source.
+- **Security:** for repo packages the planner checks the *available* version against the Arch Security Tracker and
+  shows the highest severity (click the package for IDs and links). The tracker hardly covers the AUR, so AUR
+  packages show flags instead (orphaned, flagged out of date, few votes) and **Check in AUR scanner** scans the
+  PKGBUILD right away. Flatpak has no tracker data.
+- **Install (n):** tick packages (also across searches) and press the button. The dialog lists them with their
+  security badges, offers a snapshot, a dry run and *Flatpak for me only*, then asks for the password if needed.
+
+Repo packages are installed with `pacman -Syu --needed`, so **pending updates are installed with them** – Arch does
+not support installing into an outdated system. AUR packages are built as your user after the PKGBUILD was scanned
+again; AUR dependencies that are not in the repos are not built automatically. Flatpak apps install as the user
+(*Flatpak for me only*) or system-wide, in which case the desktop asks for authentication. The planner checks
+where the `flathub` remote is set up: if it exists only system-wide (or only for the user), that scope is used and
+the switch is locked; without a `flathub` remote the install button stays disabled. After a **dry run** your
+selection stays, so you can install for real right away; after a real installation the list is refreshed.
 
 ## Updates
 
@@ -104,7 +134,8 @@ The scanner matches text patterns. It helps you decide where to look; it does no
 
 1. **Plan update** (overview) or **Update selected** (updates page) opens the **context dialog**: number of
    packages, download size, highest risk, reboot hint, warnings from the AUR scanner and from news. Options:
-   snapshot, include AUR, include Flatpak, **dry run**, and a risk limit above which updates are held back.
+   **time** (now, in 1 hour, in 2 hours, at a date and time – see below), snapshot, include AUR, include Flatpak,
+   **dry run**, and a risk limit above which updates are held back.
    Under *Clean up after the update* you can choose to
    - **remove orphaned packages** – after the update the planner determines them again and shows the list;
      they are only removed with `pacman -Rns` when you confirm;
@@ -119,6 +150,18 @@ The scanner matches text patterns. It helps you decide where to look; it does no
    building it, you are asked whether to build or skip it.
 4. At the end you see what succeeded or was skipped, new `.pacnew` files, whether a reboot is required, and the
    path of the log file. The system state is reloaded automatically.
+
+### Scheduling an update
+
+Pick *In 1 hour*, *In 2 hours* or *Time of day* (date and time; the past is rejected) in the context dialog. The
+planner saves the plan (no password) and shows a chip in the system bar; only one plan exists at a time, a new
+one replaces the old after confirmation. The planner has to be running at that time (a minimized window is
+fine, a suspended computer is not – the plan is simply due when it wakes up).
+
+When the time comes you get a desktop notification and the dialog **Scheduled update is due**:
+*Start* reloads the system state, applies your selection (updates you had deselected stay out, newly appeared
+ones are included) and asks for the sudo password; *Later (15 min)* postpones; *Discard* deletes the plan. A plan
+that became due while the planner was closed is offered when you start it next.
 
 ### Dry run
 

@@ -61,6 +61,12 @@ def quasar_language() -> str:
     return 'de' if LANG == 'de' else 'en-US'
 
 
+def thousands(n: int) -> str:
+    """Zahl mit Tausendertrennzeichen der aktiven Sprache (de: 53.308, sonst 53,308)."""
+    text = f'{n:,}'
+    return text.replace(',', '.') if LANG == 'de' else text
+
+
 def date_format() -> str:
     return '%d.%m.%Y' if LANG == 'de' else '%Y-%m-%d'
 

@@ -204,3 +204,94 @@ def test_cleanup_dry_run_uses_no_sudo(calls, monkeypatch):
     r = asyncio.run(executor.Runner(plan, _cbs_answer([], True, asked), None, {}).run())
     assert r.ok and asked == [] and not r.cache_cleaned
     assert [c for c, _ in calls] == [['paccache', '-dk', '2'], ['paccache', '-duk0']]
+
+
+# ------------------------------------------------------------------ neue Pakete installieren (1.3.0)
+
+def test_repo_install_runs_full_upgrade_with_needed(calls):
+    log = []
+    plan = executor.Plan(repo=False, install=['htop', 'python-foo+bar'], snapshot=False)
+    assert 'Repo' in plan.phases()
+    r = asyncio.run(executor.Runner(plan, cbs(log), SECRET, {}).run())
+    assert r.ok
+    cmd, proc = calls[0]
+    assert cmd[:6] == ['sudo', '-S', '-k', '-p', '', '--']
+    assert cmd[6:] == ['pacman', '-Syu', '--noconfirm', '--noprogressbar', '--needed', 'htop', 'python-foo+bar']
+    assert proc.stdin.data == (SECRET + '\n').encode()                 # Passwort nur über stdin
+    assert all(SECRET not in a for c, _ in calls for a in c)
+    assert all(SECRET not in line for line in log) and SECRET not in open(r.log_file).read()
+
+
+def test_repo_install_dry_run_has_no_sudo(calls):
+    plan = executor.Plan(repo=False, install=['htop'], dry_run=True)
+    r = asyncio.run(executor.Runner(plan, cbs([]), None, {}).run())
+    assert r.ok and all(c[0] != 'sudo' for c, _ in calls)
+    assert calls[0][0][:2] == ['pacman', '-Sup'] and '--needed' in calls[0][0] and calls[0][0][-1] == 'htop'
+
+
+@pytest.mark.parametrize('field, value', [
+    ('install', ['ok', 'bad;rm -rf /']),
+    ('aur', [('ok', 'bad name')]),
+    ('flatpak_install', ['org.ok.App', 'bad id; rm']),
+])
+def test_install_names_are_validated(calls, field, value):
+    plan = executor.Plan(repo=False, snapshot=False, **{field: value})
+    r = asyncio.run(executor.Runner(plan, cbs([]), SECRET, {}).run())
+    assert not r.ok and calls == []                                  # nichts gestartet
+
+
+@pytest.mark.parametrize('user, flag', [(True, '--user'), (False, '--system')])
+def test_flatpak_install_arguments(calls, user, flag):
+    plan = executor.Plan(repo=False, snapshot=False, flatpak_install=['org.gimp.GIMP'], flatpak_user=user)
+    assert 'Flatpak' in plan.phases() and 'Repo' not in plan.phases()
+    r = asyncio.run(executor.Runner(plan, cbs([]), None, {}).run())
+    assert r.ok
+    assert [c for c, _ in calls] == [['flatpak', 'install', '-y', '--noninteractive', flag, 'flathub', 'org.gimp.GIMP']]
+    assert all(c[0] != 'sudo' for c, _ in calls)                      # als Benutzer, polkit fragt Flatpak selbst
+
+
+def test_flatpak_install_dry_run_runs_nothing(calls):
+    plan = executor.Plan(repo=False, snapshot=False, dry_run=True, flatpak_install=['org.gimp.GIMP'])
+    r = asyncio.run(executor.Runner(plan, cbs([]), None, {}).run())
+    assert r.ok and calls == []
+
+
+def _aur_env(monkeypatch, tmp_path):
+    build = tmp_path / 'aur'
+    d = build / 'foo'
+    (d / '.git').mkdir(parents=True)
+    (d / 'PKGBUILD').write_text("pkgname=foo\nsource=('https://example.org/foo.tar.gz')\nsha256sums=('"
+                                + 'a' * 64 + "')\nb2sums=('SKIP')\n")
+    pkgs = [d / 'foo-1-1-x86_64.pkg.tar.zst', d / 'foo-debug-1-1-x86_64.pkg.tar.zst']
+    for p in pkgs:
+        p.write_text('x')
+    monkeypatch.setattr(config, 'AUR_BUILD', build)
+
+    def fake_text(cmd, cwd, ok=(0,), env=None):
+        if cmd[:2] == ['makepkg', '--printsrcinfo']:
+            return ''
+        if cmd[:2] == ['makepkg', '--packagelist']:
+            return '\n'.join(map(str, pkgs))
+        if cmd[:2] == ['pacman', '-Qq']:
+            return 'bash\nglibc\n'
+        if cmd[:2] == ['pacman', '-Qqp']:
+            return 'foo-debug\n' if 'debug' in cmd[2] else 'foo\n'
+        raise AssertionError(cmd)
+    monkeypatch.setattr(executor, '_run_text', fake_text)
+    return pkgs
+
+
+def test_aur_new_install_picks_wanted_package(calls, monkeypatch, tmp_path):
+    pkgs = _aur_env(monkeypatch, tmp_path)
+    plan = executor.Plan(repo=False, snapshot=False, aur=[('foo', 'foo')], install_aur={'foo'}, reviewed={'foo'})
+    r = asyncio.run(executor.Runner(plan, _cbs_answer([], True, []), SECRET, {}).run())
+    assert r.ok and r.updated == ['foo']
+    installs = [c for c in _no_sudo_cmds(calls) if c[:2] == ['pacman', '-U']]
+    assert installs == [['pacman', '-U', '--noconfirm', '--noprogressbar', str(pkgs[0])]]   # nur foo, nicht foo-debug
+
+
+def test_aur_update_of_not_installed_package_is_skipped(calls, monkeypatch, tmp_path):
+    _aur_env(monkeypatch, tmp_path)               # „foo“ ist nicht installiert → als Update gibt es nichts zu tun
+    plan = executor.Plan(repo=False, snapshot=False, aur=[('foo', 'foo')], reviewed={'foo'})
+    r = asyncio.run(executor.Runner(plan, _cbs_answer([], True, []), SECRET, {}).run())
+    assert r.skipped == ['foo'] and not any(c[:2] == ['pacman', '-U'] for c in _no_sudo_cmds(calls))

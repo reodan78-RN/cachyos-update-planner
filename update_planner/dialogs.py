@@ -2,17 +2,30 @@
 
 from __future__ import annotations
 
+import asyncio
+from datetime import date, datetime, timedelta
+from datetime import time as dtime
 
 from nicegui import background_tasks, ui
 
 from . import catalog as md
-from . import config, executor
+from . import config, executor, scheduler, theme
+from . import state as st
 from .i18n import _
+from .sources import flatpak
 from .state import State
+
+_REFRESH_POLL = 0.5          # s: so oft nachsehen, ob eine laufende Prüfung des Systemstands fertig ist
+
+
+def _stable_dialog(persistent: bool = False) -> ui.dialog:
+    """Dialog am Seitenlayout statt an der Unterseite: ein Neuaufbau der Seite (neuer Systemstand) schließt ihn nicht."""
+    with ui.context.client.layout:
+        return ui.dialog().props('persistent' if persistent else '')
 
 
 def _dialog_card(width: str = '520px', persistent: bool = False):
-    dialog = ui.dialog().props('persistent' if persistent else '')
+    dialog = _stable_dialog(persistent)
     with dialog:
         card = ui.card().classes('glass p-6').style(f'width:{width};max-width:94vw').props('flat')
     return dialog, card
@@ -50,6 +63,20 @@ def build_plan(state: State, opts: dict) -> tuple[executor.Plan, list[str]]:
         cache_keep=int(opts.get('cache_keep', 2)),
     )
     return plan, notes
+
+
+def _parse_day(text: str | None) -> date | None:
+    try:
+        return date.fromisoformat((text or '').strip())
+    except ValueError:
+        return None
+
+
+def _parse_clock(text: str | None) -> dtime | None:
+    try:
+        return dtime.fromisoformat((text or '').strip())
+    except ValueError:
+        return None
 
 
 async def context_dialog(state: State) -> dict | None:
@@ -94,6 +121,23 @@ async def context_dialog(state: State) -> dict | None:
                     elif link:
                         ui.link(_('Meldung öffnen'), link, new_tab=True).classes('text-sm text-primary')
         ui.separator().classes('my-3')
+        ui.label(_('Zeitpunkt')).classes('panel-title')
+        when = ui.toggle({'now': _('Jetzt'), '1h': _('In 1 Stunde'), '2h': _('In 2 Stunden'), 'time': _('Uhrzeit')},
+                         value='now').props('dense no-caps unelevated toggle-color=primary')
+        soon = datetime.now() + timedelta(hours=1)
+        with ui.row().classes('items-center gap-3 no-wrap') as at_row:
+            day = ui.input(_('Datum'), value=soon.date().isoformat()).props('type=date dense outlined').classes('w-40')
+            clock = ui.input(_('Uhrzeit'), value=soon.strftime('%H:%M')).props('type=time dense outlined').classes('w-32')
+        at_row.bind_visibility_from(when, 'value', lambda v: v == 'time')
+        when_info = ui.label('').classes('muted text-xs')
+        when_error = ui.label('').classes('text-negative text-sm')
+
+        def describe_when() -> None:
+            when_error.text = ''
+            when_info.text = (_('Das Passwort wird erst zum geplanten Zeitpunkt abgefragt. Der Update Planner muss dann '
+                                'laufen (das Fenster darf auch minimiert sein).') if when.value != 'now' else '')
+        when.on_value_change(describe_when)
+        ui.separator().classes('my-3')
         snap_text = (_('Snapshot: snap-pac legt pre/post automatisch an') if sysinfo.get('snap_pac')
                      else _('Btrfs-Snapshot vorher anlegen (Snapper)'))
         snapshot = ui.switch(snap_text, value=bool(sysinfo.get('snapper') or sysinfo.get('snap_pac')))
@@ -124,11 +168,18 @@ async def context_dialog(state: State) -> dict | None:
                    n=cache.get('candidates', 0))).classes('muted text-xs -mt-1 ml-10')
         with ui.row().classes('w-full justify-end gap-2 mt-4'):
             ui.button(_('Abbrechen'), on_click=lambda: dialog.submit(None)).props('flat')
-            ui.button(_('Weiter'), icon='arrow_forward', on_click=lambda: dialog.submit({
-                'snapshot': snapshot.value, 'aur': aur.value, 'flatpak': flatpak.value, 'hold': hold.value,
-                'dry_run': dry.value, 'sync': False,
-                'orphans': orphan_sw.value, 'cache': cache_sw.value, 'cache_keep': keep.value,
-            })).props('unelevated')
+            def proceed() -> None:
+                try:
+                    at = scheduler.compute_at(when.value, day=_parse_day(day.value), clock=_parse_clock(clock.value))
+                except ValueError as exc:
+                    when_error.text = str(exc)
+                    return
+                dialog.submit({
+                    'snapshot': snapshot.value, 'aur': aur.value, 'flatpak': flatpak.value, 'hold': hold.value,
+                    'dry_run': dry.value, 'sync': False,
+                    'orphans': orphan_sw.value, 'cache': cache_sw.value, 'cache_keep': keep.value, 'at': at,
+                })
+            ui.button(_('Weiter'), icon='arrow_forward', on_click=proceed).props('unelevated')
     result = await dialog
     dialog.delete()
     return result
@@ -199,7 +250,7 @@ async def confirm(title: str, text: str, yes: str | None = None, no: str | None 
 
 async def progress_dialog(plan: executor.Plan, password: str | None, notes: list[str]) -> executor.Result:
     phases = plan.phases()
-    dialog = ui.dialog().props('persistent')
+    dialog = _stable_dialog(persistent=True)
     with dialog, ui.card().classes('glass p-6').style('width:680px;max-width:94vw').props('flat'):
         with ui.row().classes('items-center gap-3'):
             spinner = ui.spinner(size='26px')
@@ -262,9 +313,41 @@ async def progress_dialog(plan: executor.Plan, password: str | None, notes: list
             if result.reboot:
                 ui.label(_('Neustart erforderlich (Kernel ersetzt)')).classes('text-sm text-negative font-medium')
             ui.label(_('Protokoll: {path}', path=result.log_file)).classes('muted text-xs')
-        ui.button(_('Schließen'), on_click=dialog.close).props('unelevated')
+        def close() -> None:                 # am Layout angehängt: sonst bliebe je Lauf ein Dialog samt Protokoll liegen
+            dialog.close()
+            dialog.delete()
+        ui.button(_('Schließen'), on_click=close).props('unelevated')
     ui.notify(title.text, type='positive' if result.ok else 'negative', position='top-right')
     return result
+
+
+async def _execute(state: State, plan: executor.Plan, notes: list[str], on_start=None) -> bool:
+    """Passwort abfragen (falls nötig), Lauf mit Fortschritt ausführen. False, wenn vorher abgebrochen wurde."""
+    password = None
+    needs_root = plan.repo or plan.install or plan.aur or plan.remove_orphans or plan.clean_cache \
+        or (plan.snapshot and not md.SYSTEM.get('snap_pac'))
+    if needs_root and not plan.dry_run:
+        password = await password_dialog()
+        if not password:
+            ui.notify(_('Abgebrochen'), position='top-right')
+            return False
+    state.busy = True
+    try:
+        if on_start:
+            on_start()                    # schlägt das fehl, darf busy nicht hängen bleiben
+        await progress_dialog(plan, password, notes)
+    finally:
+        password = None
+        state.busy = False
+    if not plan.dry_run:
+        # auch nach Abbruch/Teilerfolg neu laden – sonst zeigt die Oberfläche bereits installierte Updates weiter an
+        background_tasks.create(md.refresh(), name='refresh-after-update')
+    return True
+
+
+def _nothing_to_do(plan: executor.Plan) -> bool:
+    return not (plan.repo or plan.install or plan.aur or plan.flatpak or plan.flatpak_install
+                or plan.remove_orphans or plan.clean_cache)
 
 
 async def start_update(state: State) -> None:
@@ -277,24 +360,180 @@ async def start_update(state: State) -> None:
     opts = await context_dialog(state)
     if not opts:
         return
+    at = opts.pop('at', None)
+    if at:
+        await _schedule(state, opts, at)
+        return
     plan, notes = build_plan(state, opts)
-    if not (plan.repo or plan.aur or plan.flatpak or plan.remove_orphans or plan.clean_cache):
+    if _nothing_to_do(plan):
         ui.notify(_('Nach Filter und Risikogrenze bleibt nichts zu tun'), type='warning')
         return
-    password = None
-    needs_root = plan.repo or plan.aur or plan.remove_orphans or plan.clean_cache \
-        or (plan.snapshot and not md.SYSTEM.get('snap_pac'))
-    if needs_root and not plan.dry_run:
-        password = await password_dialog()
-        if not password:
-            ui.notify(_('Abgebrochen'), position='top-right')
-            return
-    state.busy = True
+    await _execute(state, plan, notes)
+
+
+async def _schedule(state: State, opts: dict, at: float) -> None:
+    if scheduler.current() and not await confirm(
+            _('Geplantes Update ersetzen?'),
+            _('Es ist bereits ein Update für {time} geplant. Es gibt nur einen Plan gleichzeitig.',
+              time=scheduler.format_at(scheduler.current().at)), yes=_('Ersetzen'), icon='schedule'):
+        return
+    # Gespeichert werden die ABGEWÄHLTEN Updates (was bis dahin neu erscheint, ist per Standardauswahl dabei) und die
+    # bewusst ZUSÄTZLICH gewählten (z. B. Risiko ≥ 80 – die Standardauswahl schließt sie sonst wieder aus)
+    visible = {u['name'] for u in state.visible_updates()}
+    deselected = visible - state.selected
+    extra = (visible & state.selected) - st.default_selection()
     try:
-        await progress_dialog(plan, password, notes)
-    finally:
-        password = None
-        state.busy = False
-    if not plan.dry_run:
-        # auch nach Abbruch/Teilerfolg neu laden – sonst zeigt die Oberfläche bereits installierte Updates weiter an
-        background_tasks.create(md.refresh(), name='refresh-after-update')
+        scheduler.schedule(at, opts, deselected, state.sources, state.reviewed, extra)
+    except OSError as exc:
+        ui.notify(_('Plan konnte nicht gespeichert werden: {err}', err=exc), type='negative', position='top-right')
+        return
+    ui.notify(_('Update geplant für {time}', time=scheduler.format_at(at)), type='positive', position='top-right')
+
+
+async def due_dialog(sch: scheduler.Schedule) -> str | None:
+    """'start' | 'later' | 'discard'; None, wenn das Fenster geschlossen wurde (Plan bleibt dann fällig)."""
+    dialog, card = _dialog_card('480px', persistent=True)
+    with card:
+        with ui.row().classes('items-center gap-3 no-wrap'):
+            ui.icon('schedule', size='28px').classes('text-primary')
+            ui.label(_('Geplantes Update ist fällig')).classes('text-xl font-semibold')
+        ui.label(_('Geplant für {time}. Beim Start wird der Systemstand neu geladen, danach fragt der Update Planner '
+                   'das sudo-Passwort ab.', time=scheduler.format_at(sch.at))).classes('text-sm')
+        with ui.row().classes('w-full justify-end gap-2 mt-3'):
+            ui.button(_('Verwerfen'), on_click=lambda: dialog.submit('discard')).props('flat color=negative')
+            ui.button(_('Später (15 min)'), on_click=lambda: dialog.submit('later')).props('flat')
+            ui.button(_('Starten'), icon='play_arrow', on_click=lambda: dialog.submit('start')).props('unelevated')
+    result = await dialog
+    dialog.delete()
+    return result
+
+
+async def run_scheduled(state: State) -> None:
+    """Fälligen Plan abarbeiten (das aufrufende Fenster hat ihn per scheduler.claim beansprucht)."""
+    sch = scheduler.current()
+    if not sch:
+        return
+    scheduler.notify_due()
+    choice = await due_dialog(sch)
+    if choice is None:
+        return
+    if choice == 'discard':
+        scheduler.cancel()
+        return
+    if choice == 'later':
+        scheduler.snooze()
+        return
+    ui.notify(_('Systemstand wird neu geladen …'), position='top-right')
+    await md.refresh()                    # kehrt sofort zurück, wenn schon eine Prüfung läuft → dann abwarten
+    while md.STATUS['state'] == 'loading':
+        await asyncio.sleep(_REFRESH_POLL)
+    if not md.ready():
+        ui.notify(_('Systemstand konnte nicht geladen werden'), type='negative')
+        scheduler.snooze()
+        return
+    # Auswahl des Plans in einem eigenen State: die Filter- und Auswahlanzeige des Fensters bleibt unverändert
+    plan_state = State(sources=set(sch.sources) or set(state.sources),
+                       selected=(st.default_selection() - set(sch.deselected)) | set(sch.selected_extra),
+                       reviewed=set(state.reviewed) | set(sch.reviewed))
+    plan, notes = build_plan(plan_state, sch.opts)
+    if _nothing_to_do(plan):
+        ui.notify(_('Nach Filter und Risikogrenze bleibt nichts zu tun'), type='warning')
+        scheduler.cancel()
+        return
+    if not await _execute(state, plan, notes, on_start=scheduler.cancel):   # Plan erst beim echten Start verbrauchen
+        scheduler.snooze()
+
+
+# ------------------------------------------------------------------ Neue Pakete installieren
+
+async def install_dialog(items: list[dict]) -> dict | None:
+    sysinfo = md.SYSTEM
+    repo_items = [c for c in items if c['source'] == 'repo']
+    flat_items = [c for c in items if c['source'] == 'flatpak']
+    pending = sum(1 for u in md.UPDATES if u['source'] == 'repo')
+    # In welchen Bereichen (Benutzer/System) ist Flathub eingerichtet? Ohne Remote im gewählten Bereich hielte
+    # `flatpak install` „flathub“ für einen App-Namen und suchte danach.
+    scopes = await asyncio.to_thread(flatpak.remote_scopes, 'flathub') if flat_items else set()
+    dialog, card = _dialog_card('560px')
+    with card:
+        with ui.row().classes('items-center gap-3'):
+            ui.icon('download', size='28px').classes('text-primary')
+            ui.label(_('{n} Pakete installieren', n=len(items))).classes('text-xl font-semibold')
+        with ui.column().classes('w-full gap-1 my-2').style('max-height:260px;overflow:auto'):
+            for c in items:
+                with ui.row().classes('w-full items-center gap-2 no-wrap'):
+                    ui.label(c['name']).classes('font-medium')
+                    ui.label(c.get('origin') or md.SOURCES[c['source']]['label']).classes('muted text-xs')
+                    ui.space()
+                    sec = c.get('sec') or {}
+                    if sec.get('severity'):
+                        theme.badge(_(sec['severity']) + (f' ×{sec["count"]}' if sec['count'] > 1 else ''),
+                                    theme.SEVERITY_COLOR.get(sec['severity'], theme.GREY))
+                    for flag in c.get('flags', []):
+                        theme.badge(flag, theme.ORANGE)
+        if repo_items:
+            with ui.row().classes('notice w-full items-start gap-2 no-wrap'):
+                ui.icon('info', color='primary')
+                ui.label(_('Repo-Pakete werden mit pacman -Syu --needed installiert: {n} anstehende Updates werden '
+                           'mitinstalliert (Arch kennt keine Teil-Updates).', n=pending)).classes('text-sm')
+        if any(c['source'] == 'aur' for c in items):
+            ui.label(_('AUR-Pakete werden als Benutzer gebaut; das PKGBUILD wird vorher gescannt. '
+                       'AUR-Abhängigkeiten aus dem AUR werden nicht automatisch gebaut.')).classes('muted text-xs mt-2')
+        ui.separator().classes('my-3')
+        snap_text = (_('Snapshot: snap-pac legt pre/post automatisch an') if sysinfo.get('snap_pac')
+                     else _('Btrfs-Snapshot vorher anlegen (Snapper)'))
+        snapshot = ui.switch(snap_text, value=bool(sysinfo.get('snapper') or sysinfo.get('snap_pac')))
+        if sysinfo.get('snap_pac') or not sysinfo.get('snapper'):
+            snapshot.disable()
+        user_only = None
+        if flat_items and not scopes:
+            with ui.row().classes('notice w-full items-start gap-2 no-wrap').style('border-left-color:#dc4e41'):
+                ui.icon('error', color='negative')
+                ui.label(_('Der Flatpak-Remote „flathub“ ist nicht eingerichtet – Flatpak-Pakete lassen sich '
+                           'nicht installieren.')).classes('text-sm')
+        elif flat_items:
+            user_only = ui.switch(_('Flatpak nur für mich installieren'), value='user' in scopes)
+            if len(scopes) == 1:                       # nur ein Bereich eingerichtet: keine Wahl
+                user_only.disable()
+                ui.label(_('Flathub ist nur für den Benutzer eingerichtet.') if 'user' in scopes
+                         else _('Flathub ist nur systemweit eingerichtet – die Installation fragt über polkit '
+                                'nach der Anmeldung.')).classes('muted text-xs -mt-1 ml-10')
+        dry = ui.switch(_('Probelauf – nichts installieren'), value=False)
+        with ui.row().classes('w-full justify-end gap-2 mt-4'):
+            ui.button(_('Abbrechen'), on_click=lambda: dialog.submit(None)).props('flat')
+            go = ui.button(_('Weiter'), icon='arrow_forward', on_click=lambda: dialog.submit({
+                'snapshot': snapshot.value, 'dry_run': dry.value,
+                'flatpak_user': bool(user_only.value) if user_only else False,
+            })).props('unelevated')
+            go.set_enabled(not (flat_items and not scopes))
+    result = await dialog
+    dialog.delete()
+    return result
+
+
+def build_install_plan(state: State, items: list[dict], opts: dict) -> executor.Plan:
+    aur = [c for c in items if c['source'] == 'aur']
+    return executor.Plan(
+        repo=False, install=[c['name'] for c in items if c['source'] == 'repo'],
+        aur=[(c['name'], c.get('base') or c['name']) for c in aur], install_aur={c['name'] for c in aur},
+        flatpak_install=[c['name'] for c in items if c['source'] == 'flatpak'],
+        flatpak_user=opts.get('flatpak_user', False),
+        snapshot=opts['snapshot'], dry_run=opts['dry_run'], reviewed=set(state.reviewed))
+
+
+async def start_install(state: State, items: list[dict]) -> bool:
+    """Ausgewählte neue Pakete sofort installieren. True nur nach einem echten Lauf – nach Abbruch oder Probelauf
+    bleibt die Auswahl bestehen, damit man gleich anschließend wirklich installieren kann."""
+    if not items:
+        return False
+    if state.busy or executor.running():
+        ui.notify(_('Es läuft bereits ein Update'), type='warning')
+        return False
+    if not md.ready():
+        ui.notify(_('Systemstand wird noch geladen …'), type='warning')
+        return False
+    opts = await install_dialog(items)
+    if not opts:
+        return False
+    plan = build_install_plan(state, items, opts)
+    return await _execute(state, plan, []) and not plan.dry_run

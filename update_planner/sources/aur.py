@@ -11,7 +11,7 @@ from urllib.parse import quote
 import httpx
 
 from .. import config
-from ..sysutil import fetch, fetch_json, valid_name, vercmp
+from ..sysutil import fetch, fetch_json, https_client, valid_name, vercmp
 
 RPC = 'https://aur.archlinux.org/rpc/v5/info'
 CGIT = 'https://aur.archlinux.org/cgit/aur.git/plain/{file}?h={base}'
@@ -24,8 +24,7 @@ def is_vcs(name: str) -> bool:
 
 
 def _client() -> httpx.AsyncClient:
-    return httpx.AsyncClient(timeout=config.HTTP_TIMEOUT, follow_redirects=True,
-                             headers={'User-Agent': config.USER_AGENT})
+    return https_client()
 
 
 async def info(names: list[str], ttl: float = 900) -> dict[str, dict]:

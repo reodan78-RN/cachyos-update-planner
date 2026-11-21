@@ -23,7 +23,7 @@ from . import config
 from .i18n import _
 
 NAME_RE = re.compile(r'^[a-zA-Z0-9@_+][a-zA-Z0-9@._+-]*$')        # pacman/AUR-Paketnamen
-FLATPAK_RE = re.compile(r'^[A-Za-z0-9_.-]+(//[A-Za-z0-9_.-]+)?$')    # Flatpak-IDs (optional //branch)
+FLATPAK_RE = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.-]*(//[A-Za-z0-9_.-]+)?')    # Flatpak-IDs (optional //branch), nie mit „-“ beginnend
 
 
 class CommandError(RuntimeError):
@@ -37,7 +37,7 @@ def valid_name(name: str) -> str:
 
 
 def valid_flatpak(ref: str) -> str:
-    if not FLATPAK_RE.match(ref) or len(ref) > 255:
+    if not FLATPAK_RE.fullmatch(ref) or len(ref) > 255:             # fullmatch: „$“ ließe ein angehängtes \n durch
         raise ValueError(_('Ungültige Flatpak-ID: {ref}', ref=repr(ref)))
     return ref
 
@@ -157,6 +157,18 @@ def version_parts(version: str) -> tuple[int, list[int]]:
 
 # ------------------------------------------------------------------ HTTP mit Datei-Cache
 
+async def _require_https(response: httpx.Response) -> None:
+    """Auch nach Weiterleitungen nur HTTPS: ein Redirect auf http:// würde TLS aushebeln."""
+    if response.url.scheme != 'https':
+        raise CommandError(_('Unsichere Weiterleitung abgelehnt: {url}', url=str(response.url)))
+
+
+def https_client() -> httpx.AsyncClient:
+    """Gemeinsamer HTTP-Client: TLS-Prüfung, Zeitlimit, höchstens 3 Weiterleitungen, nur HTTPS."""
+    return httpx.AsyncClient(timeout=config.HTTP_TIMEOUT, follow_redirects=True, max_redirects=3,
+                             headers={'User-Agent': config.USER_AGENT}, event_hooks={'response': [_require_https]})
+
+
 def _cache_path(url: str):
     return config.HTTP_CACHE / hashlib.sha256(url.encode()).hexdigest()
 
@@ -168,8 +180,7 @@ async def fetch(url: str, *, ttl: float = 3600, client: httpx.AsyncClient | None
     if path.exists() and time.time() - path.stat().st_mtime < ttl:
         return path.read_bytes()
     own = client is None
-    client = client or httpx.AsyncClient(timeout=config.HTTP_TIMEOUT, follow_redirects=True,
-                                         headers={'User-Agent': config.USER_AGENT})
+    client = client or https_client()
     try:
         async with client.stream('GET', url) as resp:
             resp.raise_for_status()
@@ -193,3 +204,33 @@ async def fetch(url: str, *, ttl: float = 3600, client: httpx.AsyncClient | None
 
 async def fetch_json(url: str, **kw):
     return json.loads(await fetch(url, **kw))
+
+
+async def post_json(url: str, body: dict, *, ttl: float = 600, client: httpx.AsyncClient | None = None):
+    """POST mit JSON-Rumpf (z. B. Flathub-Suche); gleiche Grenzen und derselbe Cache wie `fetch`."""
+    config.ensure_dirs()
+    payload = json.dumps(body, sort_keys=True)
+    path = _cache_path(url + '\n' + payload)
+    if path.exists() and time.time() - path.stat().st_mtime < ttl:
+        return json.loads(path.read_bytes())
+    own = client is None
+    client = client or https_client()
+    try:
+        async with client.stream('POST', url, content=payload, headers={'Content-Type': 'application/json'}) as resp:
+            resp.raise_for_status()
+            data = bytearray()
+            async for chunk in resp.aiter_bytes():
+                data += chunk
+                if len(data) > config.MAX_DOWNLOAD:
+                    raise CommandError(_('Antwort zu groß: {url}', url=url))
+        tmp = path.with_suffix('.tmp')
+        tmp.write_bytes(data)
+        tmp.replace(path)
+        return json.loads(bytes(data))
+    except (httpx.HTTPError, CommandError):
+        if path.exists():
+            return json.loads(path.read_bytes())
+        raise
+    finally:
+        if own:
+            await client.aclose()

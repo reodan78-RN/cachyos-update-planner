@@ -11,25 +11,32 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
-from nicegui import app, background_tasks, ui
+from nicegui import Client, app, background_tasks, ui
 from nicegui.native import find_open_port as native_port
 
-from . import __version__, config, i18n, theme
+from . import __version__, config, executor, i18n, netguard, scheduler, theme
 from . import catalog as md
 from . import state as st
+from .dialogs import run_scheduled
 from .i18n import _
-from .pages import aur_scan, conflicts, overview, packages, security, updates
+from .pages import aur_scan, conflicts, install, overview, packages, security, updates
 
+log = logging.getLogger(__name__)
 ICON = Path(__file__).parent / 'static' / 'icon.png'
 
-NAV = [
+# (Pfad, Beschriftung, Icon, Seite[, Untermenü [(Pfad, Beschriftung)]])
+NAV: list[tuple] = [
     ('/', 'Übersicht', 'dashboard', overview.page),
-    ('/packages', 'Pakete', 'account_tree', packages.page),
+    ('/packages', 'Pakete', 'account_tree', packages.page,
+     [('/packages', 'Installiert'), ('/packages/install', 'Installieren')]),
     ('/updates', 'Updates', 'system_update_alt', updates.page),
     ('/conflicts', 'Konflikte', 'call_split', conflicts.page),
     ('/security', 'Sicherheit', 'shield', security.page),
     ('/aur-scan', 'AUR-Scanner', 'policy', aur_scan.page),
 ]
+
+# Alle Seiten (auch die Untermenü-Ziele, die keinen eigenen NAV-Eintrag haben)
+PAGES = {path: fn for path, _label, _icon, fn, *_sub in NAV} | {'/packages/install': install.page}
 
 THEME_CYCLE = {None: True, True: False, False: None}
 THEME_ICON = {None: 'brightness_auto', True: 'dark_mode', False: 'light_mode'}
@@ -48,6 +55,14 @@ def root() -> None:
             ui.image(ICON).classes('w-7 h-7 shrink-0').props('no-spinner no-transition')
             ui.label('CachyOS Update Planner').classes('app-name')
             ui.space()
+            sched_chip = ui.chip('', icon='schedule', removable=True).props('dense outline color=white text-color=white') \
+                .tooltip(_('Geplantes Update – × bricht den Plan ab'))
+            sched_chip.set_visibility(False)
+
+            def cancel_plan() -> None:
+                scheduler.cancel()
+                ui.notify(_('Geplantes Update abgebrochen'), position='top-right')
+            sched_chip.on('remove', cancel_plan)
             labels = {k: v['label'] for k, v in md.SOURCES.items()}
 
             def set_sources(e) -> None:
@@ -81,24 +96,50 @@ def root() -> None:
             ui.label(f'v{__version__}' + (' Demo' if md.STATUS.get('demo') else '')).classes('meta')
 
         with ui.row().classes('appnav w-full items-center gap-0 no-wrap overflow-x-auto'):
-            for path, label, _icon, _fn in NAV:
-                item = ui.label(_(label)).classes('nav-item').props('tabindex=0 role=link')
-                item.on('click', lambda p=path: ui.navigate.to(p))
-                item.on('keydown.enter', lambda p=path: ui.navigate.to(p))
+            for path, label, _icon, _fn, *sub in NAV:
+                if sub:
+                    item = ui.label(_(label) + ' ▾').classes('nav-item').props('tabindex=0 role=button aria-haspopup=menu')
+                    with item, ui.menu().props('auto-close') as menu:
+                        for sub_path, sub_label in sub[0]:
+                            ui.menu_item(_(sub_label), on_click=lambda p=sub_path: ui.navigate.to(p))
+                    item.on('keydown.enter', menu.open)
+                    item.on('keydown.down', menu.open)
+                    for sub_path, _l in sub[0]:
+                        nav_items[sub_path] = item
+                else:
+                    item = ui.label(_(label)).classes('nav-item').props('tabindex=0 role=link')
+                    item.on('click', lambda p=path: ui.navigate.to(p))
+                    item.on('keydown.enter', lambda p=path: ui.navigate.to(p))
                 nav_items[path] = item
 
     def wrap(path: str, builder: Callable[[], None]) -> Callable[[], None]:
         def build() -> None:
-            for p, item in nav_items.items():
-                item.classes(add='active') if p == path else item.classes(remove='active')
+            current = nav_items.get(path)
+            for item in {id(i): i for i in nav_items.values()}.values():
+                item.classes(add='active') if item is current else item.classes(remove='active')
             with ui.column().classes('w-full max-w-[1500px] mx-auto gap-3 px-4 pt-4 pb-8'):
                 builder()
         return build
 
-    ui.sub_pages({path: wrap(path, fn) for path, _label, _icon, fn in NAV}).classes('w-full')
+    ui.sub_pages({path: wrap(path, fn) for path, fn in PAGES.items()}).classes('w-full')
 
     # ---------- Systemstand beobachten (Laden im Hintergrund, Update fertig, Fehler) ----------
     seen = {'state': None, 'step': None}
+    client = ui.context.client
+    client.on_disconnect(lambda: scheduler.release(client.id))   # Fenster zu → Plan kann ein anderes Fenster übernehmen
+    asked = {'busy': False}
+
+    async def handle_due() -> None:
+        try:
+            with client.layout:               # Hintergrund-Task braucht einen UI-Kontext für Dialoge und Meldungen
+                await run_scheduled(s)
+        except Exception:  # noqa: BLE001 – nicht bei jedem Poll erneut fehlschlagen
+            if client.id in Client.instances:     # Fenster weg (Reload/Schließen): Plan bleibt fällig für das nächste
+                log.exception('Geplantes Update konnte nicht gestartet werden')
+                scheduler.snooze()
+        finally:
+            asked['busy'] = False
+            scheduler.release(client.id)
 
     def poll() -> None:
         loading = md.STATUS['state'] == 'loading'
@@ -109,6 +150,14 @@ def root() -> None:
         loaded = md.STATUS.get('loaded_at')
         checked.text = (md.STATUS['step'] if loading else
                         _('Geprüft {time}', time=datetime.fromtimestamp(loaded).strftime('%H:%M')) if loaded else '')
+        plan = scheduler.current()
+        sched_chip.set_visibility(plan is not None)
+        if plan:
+            sched_chip.text = _('Update geplant {time}', time=scheduler.format_at(plan.at))
+            if scheduler.due() and not asked['busy'] and not s.busy and not executor.running() and md.ready() \
+                    and scheduler.claim(client.id):
+                asked['busy'] = True
+                background_tasks.create(handle_due(), name='scheduled-update')
         changed = s.sync_catalog()
         if changed or md.STATUS['state'] != seen['state'] or (not md.VERSION and md.STATUS['step'] != seen['step']):
             seen.update(state=md.STATUS['state'], step=md.STATUS['step'])
@@ -138,6 +187,8 @@ def main() -> None:
         md.load_demo()
     else:
         app.on_startup(md.refresh)
+
+    app.add_middleware(netguard.LocalOnlyMiddleware)    # Host/Origin/Benutzer prüfen (siehe netguard)
 
     if args.browser:
         args.port = args.port or 8765

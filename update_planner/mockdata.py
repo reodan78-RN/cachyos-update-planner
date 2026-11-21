@@ -145,3 +145,34 @@ def risk_level(score: int) -> tuple[str, str]:
     if score >= 30:
         return 'mittel', 'warning'
     return 'niedrig', 'positive'
+
+
+# Kandidaten für „Installieren“ (Demo): Argumente für discover.candidate()
+DISCOVER: dict[str, list[dict]] = {
+    'repo': [
+        dict(name='firefox', source='repo', repo='extra', version='145.0.2-1', desc='Standalone web browser from mozilla.org', popularity=71.4, pop_label='71.4 %'),
+        dict(name='vlc', source='repo', repo='extra', version='3.0.22-2', desc='Multi-platform MPEG, VCD/DVD, and DivX player', popularity=48.9, pop_label='48.9 %'),
+        dict(name='htop', source='repo', repo='cachyos-v3', version='3.4.1-1', desc='Interactive process viewer', popularity=44.0, pop_label='44.0 %'),
+        dict(name='nginx', source='repo', repo='extra', version='1.29.3-1', desc='Lightweight HTTP server and IMAP/POP3 proxy server', popularity=18.2, pop_label='18.2 %'),
+        dict(name='gimp', source='repo', repo='extra', version='3.0.6-1', desc='GNU Image Manipulation Program', popularity=21.7, pop_label='21.7 %'),
+        dict(name='ripgrep', source='repo', repo='extra', version='15.1.0-1', desc='A search tool that combines the usability of ag with the raw speed of grep', popularity=39.5, pop_label='39.5 %'),
+        dict(name='cachyos-ananicy-rules', source='repo', repo='cachyos', version='20251105-1', desc='CachyOS ananicy rules based on ananicy-rules', popularity=33.1, pop_label='33.1 %'),
+    ],
+    'aur': [
+        dict(name='yay', source='aur', repo='aur', version='12.5.2-1', desc='Yet another yogurt. Pacman wrapper and AUR helper written in go.', popularity=18.62, pop_label='18.62 · 2210 Stimmen', votes=2210),
+        dict(name='brave-bin', source='aur', repo='aur', version='1.84.132-1', desc='Web browser that blocks ads and trackers by default (binary release)', popularity=9.4, pop_label='9.40 · 1480 Stimmen', votes=1480),
+        dict(name='old-theme-git', source='aur', repo='aur', version='r12.abc1234-1', desc='Abandoned icon theme', popularity=0.01, pop_label='0.01 · 3 Stimmen', votes=3,
+             flags=['verwaist (kein Maintainer)', 'als veraltet markiert', 'wenige Stimmen']),
+    ],
+    'flatpak': [
+        dict(name='com.spotify.Client', source='flatpak', repo='flathub', desc='Spotify – Music for everyone', popularity=1_250_000.0, pop_label='1,250,000 Inst./Monat'),
+        dict(name='org.videolan.VLC', source='flatpak', repo='flathub', desc='VLC – Multimedia player', popularity=980_000.0, pop_label='980,000 Inst./Monat'),
+        dict(name='org.gimp.GIMP', source='flatpak', repo='flathub', desc='GNU Image Manipulation Program – High-end image creation', popularity=53_308.0, pop_label='53,308 Inst./Monat'),
+    ],
+}
+
+# Security-Tracker-Rohdaten (Demo): offene Lücke in nginx 1.29.3-1 aus dem Repo
+ADVISORIES: list[dict] = [
+    dict(name='AVG-90001', packages=['nginx'], status='Vulnerable', severity='High', type='denial-of-service',
+         affected='1.29.0-1', fixed=None, issues=['CVE-2026-90001']),
+]

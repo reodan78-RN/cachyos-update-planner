@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.3.0 – 2026-11-21
+
+- **Install new packages:** new page *Packages → Install* (`/packages/install`). Search the CachyOS/Arch repos,
+  the AUR and Flathub by name or keyword, sorted by popularity (pkgstats for repos, AUR popularity, Flathub installs
+  per month). Without a search term the top 50 repo and Flatpak packages are listed; installed packages are hidden.
+  Multi-select, a details panel (description, dependencies, open vulnerabilities, AUR flags) and the button
+  *Install (n)*.
+- **Security hints for candidates:** repo packages are checked against the Arch Security Tracker for the
+  *available* version; AUR packages show *orphaned*, *flagged out of date* and *few votes* and can be checked with
+  the AUR scanner; Flatpak has no tracker data.
+- **Install dialog and run:** repo packages are installed with `pacman -Syu --needed <packages>` (pending updates
+  come along – Arch has no partial upgrades), AUR packages are built by the existing, re-scanning AUR step, Flatpak
+  apps with `flatpak install --user|--system flathub <id>`. Snapshot and dry run as for updates.
+- **Schedule an update:** the *Plan update* dialog has a *Time* choice: now, in 1 hour, in 2 hours or a date and
+  time. The plan is stored without secrets in `~/.config/update-planner/schedule.json`; when it is due the planner
+  shows a notification and a dialog (*Start*, *Later (15 min)*, *Discard*) and only then asks for the sudo
+  password. Updates that appeared in the meantime are included; deselected ones stay out. A chip in the system bar
+  shows the plan and cancels it.
+- **Overview:** the tile is now *Vulnerabilities in installed pkgs* and shows how many of them an update closes.
+- **Security hardening:** the local web server now rejects foreign `Host`/`Origin` headers and connections from other
+  users (cross-site WebSocket hijacking, DNS rebinding); all HTTP clients refuse redirects to `http://`; search terms
+  and Flatpak IDs can no longer become command options.
+- Submenu under *Packages* in the navigation (*Installed*, *Install*).
+
 ## 1.2.0 – 2026-11-20
 
 - **Dashboard design modelled on Splunk:** dark system bar and horizontal app navigation instead of the side

@@ -50,16 +50,20 @@ class Plan:
     remove_orphans: bool = False                      # nach dem Update verwaiste Pakete anbieten (Rückfrage)
     clean_cache: bool = False                         # Paket-Cache mit paccache aufräumen
     cache_keep: int = 2                               # so viele Versionen je Paket behalten
+    install: list[str] = field(default_factory=list)  # NEU zu installierende Repo-Pakete (pacman -Syu --needed …)
+    install_aur: set[str] = field(default_factory=set)  # Teilmenge von `aur`, die neu installiert wird (kein Update)
+    flatpak_install: list[str] = field(default_factory=list)  # neue Flatpak-IDs aus Flathub
+    flatpak_user: bool = False                        # Flatpak nur für den Benutzer statt systemweit
 
     def phases(self) -> list[str]:
         p = ['Vorbereitung']
         if self.snapshot and not self.dry_run:
             p.append('Snapshot')
-        if self.repo:
+        if self.repo or self.install:
             p.append('Repo')
         if self.aur:
             p.append('AUR')
-        if self.flatpak:
+        if self.flatpak or self.flatpak_install:
             p.append('Flatpak')
         if self.remove_orphans or self.clean_cache:
             p.append('Aufräumen')
@@ -214,11 +218,11 @@ class Runner:
         await self._prepare()
         if 'Snapshot' in self._phases:
             await self._snapshot('pre')
-        if self.plan.repo:
+        if self.plan.repo or self.plan.install:
             await self._repo()
         if self.plan.aur:
             await self._aur()
-        if self.plan.flatpak:
+        if self.plan.flatpak or self.plan.flatpak_install:
             await self._flatpak()
         if 'Aufräumen' in self._phases:
             await self._cleanup()
@@ -229,8 +233,11 @@ class Runner:
         self._log(_(':: Update Planner – Probelauf gestartet') if self.plan.dry_run else _(':: Update Planner – Update gestartet'))
         if pacman_src.db_locked():
             raise _Abort(_('pacman-Datenbank ist gesperrt (/var/lib/pacman/db.lck).'))
-        for n in self.plan.hold:
+        for n in [*self.plan.hold, *self.plan.install, *(n for n, _b in self.plan.aur),
+                  *(b for _n, b in self.plan.aur)]:
             valid_name(n)
+        for ref in [*self.plan.flatpak, *self.plan.flatpak_install]:
+            valid_flatpak(ref)
         self._pacnew_before = set(await asyncio.to_thread(pacman_src.pacnew_files))
         self._progress(1.0)
 
@@ -293,14 +300,19 @@ class Runner:
                 self.cb.phase(f'Repo · {state["sub"]}')
 
         ignore = ['--ignore', ','.join(self.plan.hold)] if self.plan.hold else []
+        install = [valid_name(n) for n in self.plan.install]
+        # Neue Pakete immer mit vollständigem Systemupdate (-Syu) – Arch unterstützt keine Teil-Updates
+        extra = ['--needed', *install] if install else []
         if self.plan.dry_run:
             out: list[str] = []
             rc = await self._stream(['pacman', '-Sup', '--dbpath', str(config.CHECKUP_DB), '--logfile', '/dev/null',
-                                     '--print-format', '%n %v', *ignore], on_line=out.append)
+                                     '--print-format', '%n %v', *(['--needed'] if install else []), *ignore, *install],
+                                    on_line=out.append)
             self._log(_(':: Probelauf: {n} Repo-Pakete würden aktualisiert', n=len(out))
                       + (_(', {n} zurückgehalten', n=len(self.plan.hold)) if self.plan.hold else ''))
         else:
-            rc = await self._stream(['pacman', '-Syu', '--noconfirm', '--noprogressbar', *ignore], sudo=True, on_line=parse)
+            rc = await self._stream(['pacman', '-Syu', '--noconfirm', '--noprogressbar', *ignore, *extra],
+                                    sudo=True, on_line=parse)
         if rc != 0:
             raise _Abort(_('pacman beendet mit Fehlercode {rc} – siehe Protokoll.', rc=rc))
         self.result.updated.append('Repo')
@@ -369,7 +381,11 @@ class Runner:
         pkgs = [p for p in (await asyncio.to_thread(_run_text, ['makepkg', '--packagelist'], d, (0,), env)).split()
                 if Path(p).is_file()]
         installed = set((await asyncio.to_thread(_run_text, ['pacman', '-Qq'], None)).split())
-        wanted = [p for p in pkgs if (await asyncio.to_thread(_run_text, ['pacman', '-Qqp', p], None)).strip() in installed]
+        names = {p: (await asyncio.to_thread(_run_text, ['pacman', '-Qqp', p], None)).strip() for p in pkgs}
+        if name in self.plan.install_aur:         # Neuinstallation: genau das gewünschte Paket (nicht „schon installiert“)
+            wanted = [p for p, n in names.items() if n == name]
+        else:
+            wanted = [p for p, n in names.items() if n in installed]
         if not wanted:
             raise _Skip(_('kein passendes Paket gebaut'))
         if await self._stream(['pacman', '-U', '--noconfirm', '--noprogressbar', *wanted], sudo=True) != 0:
@@ -379,12 +395,29 @@ class Runner:
     async def _flatpak(self) -> None:
         self._enter('Flatpak')
         ids = [valid_flatpak(x) for x in self.plan.flatpak]
-        if self.plan.dry_run:
-            self._log(_(':: Probelauf: {cmd}', cmd='flatpak update ' + ' '.join(ids)))
-        else:
-            rc = await self._stream(['flatpak', 'update', '-y', '--noninteractive', *ids])
-            if rc != 0:
-                self.result.errors.append(_('flatpak update beendet mit {rc}', rc=rc))
+        new = [valid_flatpak(x) for x in self.plan.flatpak_install]
+        if ids:
+            if self.plan.dry_run:
+                self._log(_(':: Probelauf: {cmd}', cmd='flatpak update ' + ' '.join(ids)))
+            else:
+                rc = await self._stream(['flatpak', 'update', '-y', '--noninteractive', *ids])
+                if rc != 0:
+                    self.result.errors.append(_('flatpak update beendet mit {rc}', rc=rc))
+        for i, ref in enumerate(new):
+            # als Benutzer; bei Systeminstallation fragt Flatpak selbst über polkit (KDE-Dialog) nach
+            cmd = ['flatpak', 'install', '-y', '--noninteractive', '--user' if self.plan.flatpak_user else '--system',
+                   'flathub', ref]
+            if self.plan.dry_run:
+                self._log(_(':: Probelauf: {cmd}', cmd=' '.join(cmd)))
+            else:
+                rc = await self._stream(cmd)
+                if rc != 0:
+                    self.result.errors.append(_('flatpak install beendet mit {rc}', rc=rc))
+                    self.result.ok = False
+                    self.result.skipped.append(ref)
+                    continue
+            self.result.updated.append(ref)
+            self._progress((i + 1) / len(new))
         self.result.updated.append('Flatpak')
         self._progress(1.0)
 

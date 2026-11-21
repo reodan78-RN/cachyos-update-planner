@@ -8,8 +8,7 @@ import re
 
 import httpx
 
-from .. import config
-from ..sysutil import fetch_json, vercmp
+from ..sysutil import fetch_json, https_client, vercmp
 
 log = logging.getLogger(__name__)
 
@@ -74,8 +73,7 @@ async def describe(items: list[dict], ttl: float = 7 * 86400, per_group: int = 2
     details: dict[str, dict] = {}
     sem = asyncio.Semaphore(2)
 
-    async with httpx.AsyncClient(timeout=config.HTTP_TIMEOUT, follow_redirects=True,
-                                 headers={'User-Agent': config.USER_AGENT}) as client:
+    async with https_client() as client:
         async def one(cve: str) -> None:
             if cve in details:
                 return

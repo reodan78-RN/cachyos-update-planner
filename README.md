@@ -13,7 +13,9 @@ patterns, and then runs the update with a progress view.
 
 ## Features
 
-- **Packages** – every installed package with its origin and a dependency graph per package
+- **Packages** – every installed package with its origin and a dependency graph per package; the submenu
+  **Install** searches **new** packages in the CachyOS/Arch repos, the AUR and Flathub, sorted by popularity,
+  with security hints, and installs them
 - **Updates** – pending repo, AUR and Flatpak updates with a risk score from 0 to 100 and the reasons behind it
 - **Conflicts** – updates that must be installed together (versioned dependencies, sonames, split packages),
   AUR packages that need a rebuild, Python minor bumps, expected `.pacnew` files, low disk space, a locked
@@ -24,6 +26,8 @@ patterns, and then runs the update with a progress view.
   the last built version, and checks for any AUR package *before* you install it
 - **Update** – context dialog → password dialog → progress with phases, live log and questions;
   a **dry run** mode changes nothing; every run writes a log
+- **Schedule** – start the update now, in 1 h, in 2 h or at a chosen time; the password is only asked for at that
+  time (nothing is stored)
 - **Desktop app** – own window (NiceGUI + GTK/WebKit), light and dark theme, KDE menu entry and icon
 - **Language** – follows the system language (German or English; other languages fall back to English)
 
