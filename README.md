@@ -20,8 +20,9 @@ all three sources (sorted by popularity, with security hints) and **schedule** a
 
 - **Overview** – installed packages, pending updates, highest risk, vulnerabilities in installed packages (and how
   many an update closes), package changes per day, riskiest updates, system state, news
-- **Packages** – every installed package with its origin and a dependency graph per package
-- **Install new packages** (*Packages → Install*) – search the CachyOS/Arch repos, the AUR and Flathub by name or
+- **Packages** – every installed package with its origin and a dependency graph per package, and a **Remove** button
+  (preview of what pacman would remove, snapshot, dry run; system components are protected)
+- **Install new packages** (*Packages → Search and install packages*) – search the CachyOS/Arch repos, the AUR and Flathub by name or
   keyword, sorted by popularity (pkgstats, AUR votes, Flathub installs). Repo candidates are checked against the
   Arch Security Tracker for the *available* version, AUR candidates show orphaned / out-of-date / few-votes flags
   and can be scanned first. Repo packages are installed with `pacman -Syu --needed` (no partial upgrades), AUR

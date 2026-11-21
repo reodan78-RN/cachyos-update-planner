@@ -63,6 +63,32 @@ def installed() -> dict[str, Installed]:
     return pkgs
 
 
+BREAKS_RE = re.compile(r"removing (\S+) breaks dependency '[^']*' required by (\S+)")
+
+
+def parse_removal(text: str) -> tuple[list[str], list[str]]:
+    """Ausgabe von `pacman -Rsp --print-format %n`: (Pakete, die entfernt würden, Pakete, die dadurch brechen).
+
+    Im Druckmodus meldet pacman verletzte Abhängigkeiten als Text („removing X breaks dependency 'X' required by Y“)
+    mit Rückgabewert 0 – ohne Auswertung sähe so eine Vorschau wie ein erlaubtes Entfernen aus."""
+    names, blockers = [], []
+    for line in text.splitlines():
+        line = line.strip()
+        m = BREAKS_RE.search(line)
+        if m:
+            if m.group(2) not in blockers:
+                blockers.append(m.group(2))
+        elif re.fullmatch(r'[a-zA-Z0-9@_+][a-zA-Z0-9@._+-]*', line) and line not in names:
+            names.append(line)
+    return names, blockers
+
+
+def removal_preview(names: list[str]) -> tuple[list[str], list[str]]:
+    """Was `pacman -Rs <names>` entfernen würde (inkl. nicht mehr benötigter Abhängigkeiten) und was daran hinge."""
+    out = run(['pacman', '-Rsp', '--print-format', '%n', *[valid_name(n) for n in names]], timeout=60, ok_codes=(0, 1))
+    return parse_removal(out)
+
+
 def parse_leaves(text: str) -> set[str]:
     """Aus `expac -S '%n<US>%E<US>%P'` (Name, Abhängigkeiten ohne Version, Provides): Pakete, von denen KEIN anderes
     Paket abhängt – weder über den Namen noch über ein Provides (Sonames, virtuelle Pakete). Das sind die Programme, die

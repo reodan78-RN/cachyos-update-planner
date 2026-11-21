@@ -350,3 +350,21 @@ def test_leaf_packages_exclude_dependencies_and_providers():
     text = '\n'.join(S.join(r) for r in rows) + '\n'
     assert pacman.parse_leaves(text) == {'firefox', 'ardour', 'htop'}
     assert pacman.parse_leaves('') == set() and pacman.parse_leaves('kaputt\n') == set()
+
+
+def test_parse_removal_lists_packages_and_blockers():
+    names, blockers = pacman.parse_removal("btop\nlibfoo\nbtop\n")
+    assert names == ['btop', 'libfoo'] and blockers == []
+    text = ("checking dependencies...\n:: removing glibc breaks dependency 'glibc' required by zstd\n"
+            ":: removing glibc breaks dependency 'glibc' required by zlib\n:: removing glibc breaks dependency 'x' required by zstd\n")
+    names, blockers = pacman.parse_removal(text)
+    assert names == [] and blockers == ['zstd', 'zlib']                       # ohne Dubletten, „checking …“ ist kein Paket
+
+
+def test_removal_preview_uses_validated_names(monkeypatch):
+    calls = []
+    monkeypatch.setattr(pacman, 'run', lambda cmd, **kw: calls.append(list(cmd)) or 'btop\n')
+    assert pacman.removal_preview(['btop']) == (['btop'], [])
+    assert calls[0] == ['pacman', '-Rsp', '--print-format', '%n', 'btop']
+    with pytest.raises(ValueError):
+        pacman.removal_preview(['-Rdd'])

@@ -13,7 +13,7 @@ DISPLAY_KEYS = [
     'behoben durch Update', 'Fix im Repo – Update nicht verfügbar', 'offen – kein Fix',
     'Gefährlich – nicht installieren', 'Manuell prüfen', 'Auffällig', 'Unbedenklich', 'Gefährlich',
     'Vorbereitung', 'Snapshot', 'Repo', 'AUR', 'Flatpak', 'Aufräumen', 'Abschluss', 'Download', 'Prüfen', 'Installieren', 'Hooks',
-    'Übersicht', 'Pakete', 'Installiert', 'Updates', 'Konflikte', 'Sicherheit', 'AUR-Scanner',
+    'Übersicht', 'Pakete', 'Installiert', 'Pakete suchen und installieren', 'Entfernen', 'Updates', 'Konflikte', 'Sicherheit', 'AUR-Scanner',
     'Design: System', 'Design: Dunkel', 'Design: Hell',
 ]
 

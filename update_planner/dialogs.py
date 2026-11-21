@@ -13,6 +13,7 @@ from . import config, executor, scheduler, theme
 from . import state as st
 from .i18n import _
 from .sources import flatpak
+from .sources import pacman as pacman_src
 from .state import State
 
 _REFRESH_POLL = 0.5          # s: so oft nachsehen, ob eine laufende Prüfung des Systemstands fertig ist
@@ -254,7 +255,10 @@ async def progress_dialog(plan: executor.Plan, password: str | None, notes: list
     with dialog, ui.card().classes('glass p-6').style('width:680px;max-width:94vw').props('flat'):
         with ui.row().classes('items-center gap-3'):
             spinner = ui.spinner(size='26px')
-            title = ui.label(_('Probelauf …') if plan.dry_run else _('Update läuft …')).classes('text-xl font-semibold')
+            titles = {'install': (_('Installation läuft …'), _('Installation abgeschlossen'), _('Installation abgebrochen')),
+                      'remove': (_('Entfernen läuft …'), _('Entfernen abgeschlossen'), _('Entfernen abgebrochen')),
+                      'update': (_('Update läuft …'), _('Update abgeschlossen'), _('Update abgebrochen'))}[plan.kind()]
+            title = ui.label(_('Probelauf …') if plan.dry_run else titles[0]).classes('text-xl font-semibold')
         ui.label(_('Gesamt')).classes('muted text-xs mt-2')
         total = ui.linear_progress(0, size='14px', show_value=False).props('instant-feedback')
         with ui.row().classes('w-full justify-between'):
@@ -299,7 +303,7 @@ async def progress_dialog(plan: executor.Plan, password: str | None, notes: list
     spinner.set_visibility(False)
     if current['p']:
         chips[current['p']].props(f'icon={"check_circle" if result.ok else "cancel"} color={"positive" if result.ok else "negative"}')
-    title.text = (_('Probelauf abgeschlossen') if plan.dry_run else _('Update abgeschlossen')) if result.ok else _('Update abgebrochen')
+    title.text = (_('Probelauf abgeschlossen') if plan.dry_run else titles[1]) if result.ok else titles[2]
     phase_label.text = (_('{ok} Schritte erfolgreich · {skipped} übersprungen', ok=len(result.updated), skipped=len(result.skipped))
                         + (_(' · Fehler: {err}', err=result.errors[0]) if result.errors else ''))
     with footer:
@@ -324,7 +328,7 @@ async def progress_dialog(plan: executor.Plan, password: str | None, notes: list
 async def _execute(state: State, plan: executor.Plan, notes: list[str], on_start=None) -> bool:
     """Passwort abfragen (falls nötig), Lauf mit Fortschritt ausführen. False, wenn vorher abgebrochen wurde."""
     password = None
-    needs_root = plan.repo or plan.install or plan.aur or plan.remove_orphans or plan.clean_cache \
+    needs_root = plan.repo or plan.install or plan.remove or plan.aur or plan.remove_orphans or plan.clean_cache \
         or (plan.snapshot and not md.SYSTEM.get('snap_pac'))
     if needs_root and not plan.dry_run:
         password = await password_dialog()
@@ -347,7 +351,7 @@ async def _execute(state: State, plan: executor.Plan, notes: list[str], on_start
 
 def _nothing_to_do(plan: executor.Plan) -> bool:
     return not (plan.repo or plan.install or plan.aur or plan.flatpak or plan.flatpak_install
-                or plan.remove_orphans or plan.clean_cache)
+                or plan.remove or plan.flatpak_remove or plan.remove_orphans or plan.clean_cache)
 
 
 async def start_update(state: State) -> None:
@@ -498,6 +502,10 @@ async def install_dialog(items: list[dict]) -> dict | None:
                 ui.label(_('Flathub ist nur für den Benutzer eingerichtet.') if 'user' in scopes
                          else _('Flathub ist nur systemweit eingerichtet – die Installation fragt über polkit '
                                 'nach der Anmeldung.')).classes('muted text-xs -mt-1 ml-10')
+        if flat_items and scopes:
+            ui.label(_('Flatpak braucht kein sudo-Passwort: Die Benutzerinstallation benötigt keine Berechtigung, '
+                       'systemweit fragt Flatpak bei Bedarf über Polkit (Gruppe wheel meist ohne Abfrage).')) \
+                .classes('muted text-xs -mt-1 ml-10')
         dry = ui.switch(_('Probelauf – nichts installieren'), value=False)
         with ui.row().classes('w-full justify-end gap-2 mt-4'):
             ui.button(_('Abbrechen'), on_click=lambda: dialog.submit(None)).props('flat')
@@ -536,4 +544,92 @@ async def start_install(state: State, items: list[dict]) -> bool:
     if not opts:
         return False
     plan = build_install_plan(state, items, opts)
+    return await _execute(state, plan, []) and not plan.dry_run
+
+
+# ------------------------------------------------------------------ Software entfernen
+
+def is_protected(name: str) -> bool:
+    """Systemkomponenten, die der Planner nie entfernt (Kernel, glibc, systemd, pacman, Treiber …)."""
+    return config.matches(name, config.CRITICAL)
+
+
+async def remove_dialog(pkg: dict) -> dict | None:
+    """Vorschau (was pacman tatsächlich entfernen würde) und Optionen. None bei Abbruch."""
+    name, flat = pkg['name'], pkg['source'] == 'flatpak'
+    gone: list[str] = [name]
+    blockers: list[str] = []
+    error = ''
+    if not flat and not md.STATUS.get('demo'):
+        try:
+            gone, blockers = await asyncio.to_thread(pacman_src.removal_preview, [name])
+        except Exception as exc:  # noqa: BLE001 – ohne Vorschau wird nicht entfernt
+            error = str(exc)[:300]
+    protected = sorted(n for n in [name, *gone] if is_protected(n))
+    blocked = bool(blockers or error or protected or (not flat and name not in gone and not md.STATUS.get('demo')))
+    sysinfo = md.SYSTEM
+    dialog, card = _dialog_card('560px')
+    with card:
+        with ui.row().classes('items-center gap-3 no-wrap'):
+            ui.icon('delete', size='28px').classes('text-negative')
+            ui.label(_('„{name}“ entfernen', name=name)).classes('text-xl font-semibold')
+        if flat:
+            ui.label(_('Die Flatpak-App wird {scope} entfernt.',
+                       scope=_('für den Benutzer') if pkg.get('reason') == 'user' else _('systemweit'))).classes('text-sm')
+        elif gone and not blockers:
+            ui.label(_('pacman würde {n} Pakete entfernen (das Paket und Abhängigkeiten, die sonst niemand braucht):',
+                       n=len(gone))).classes('text-sm')
+            ui.label(', '.join(gone[:30]) + (' …' if len(gone) > 30 else '')).classes('text-sm font-medium')
+        for text in ([_('Systemkomponente – wird nicht entfernt: {pkgs}', pkgs=', '.join(protected))] if protected else []) \
+                + ([_('Entfernen nicht möglich – davon abhängig: {pkgs}', pkgs=', '.join(blockers[:10]))] if blockers else []) \
+                + ([_('Vorschau fehlgeschlagen: {err}', err=error)] if error else []):
+            with ui.row().classes('notice w-full items-start gap-2 no-wrap mt-2').style('border-left-color:#dc4e41'):
+                ui.icon('block', color='negative')
+                ui.label(text).classes('text-sm')
+        ui.separator().classes('my-3')
+        snapshot = None
+        if not flat:
+            snap_text = (_('Snapshot: snap-pac legt pre/post automatisch an') if sysinfo.get('snap_pac')
+                         else _('Btrfs-Snapshot vorher anlegen (Snapper)'))
+            snapshot = ui.switch(snap_text, value=bool(sysinfo.get('snapper') or sysinfo.get('snap_pac')))
+            if sysinfo.get('snap_pac') or not sysinfo.get('snapper'):
+                snapshot.disable()
+            extra = ui.switch(_('Konfigurationsdateien ebenfalls löschen (sonst bleiben .pacsave-Dateien)'), value=False)
+        else:
+            extra = ui.switch(_('Anwendungsdaten ebenfalls löschen (~/.var/app)'), value=False)
+        dry = ui.switch(_('Probelauf – nichts entfernen'), value=False)
+        with ui.row().classes('w-full justify-end gap-2 mt-4'):
+            ui.button(_('Abbrechen'), on_click=lambda: dialog.submit(None)).props('flat')
+            go = ui.button(_('Entfernen'), icon='delete', on_click=lambda: dialog.submit({
+                'snapshot': bool(snapshot.value) if snapshot else False, 'extra': extra.value, 'dry_run': dry.value,
+            })).props('unelevated color=negative')
+            go.set_enabled(not blocked)
+    result = await dialog
+    dialog.delete()
+    return result
+
+
+def build_remove_plan(pkg: dict, opts: dict) -> executor.Plan:
+    if pkg['source'] == 'flatpak':
+        return executor.Plan(repo=False, snapshot=False, dry_run=opts['dry_run'], flatpak_remove=[pkg['name']],
+                             flatpak_remove_user=pkg.get('reason') == 'user', flatpak_remove_data=opts['extra'])
+    return executor.Plan(repo=False, snapshot=opts['snapshot'], dry_run=opts['dry_run'], remove=[pkg['name']],
+                         remove_configs=opts['extra'])
+
+
+async def start_remove(state: State, pkg: dict) -> bool:
+    """Software entfernen. True nur nach einem echten Lauf (dann ändert sich der Bestand)."""
+    if state.busy or executor.running():
+        ui.notify(_('Es läuft bereits ein Update'), type='warning')
+        return False
+    if not md.ready():
+        ui.notify(_('Systemstand wird noch geladen …'), type='warning')
+        return False
+    if is_protected(pkg['name']):
+        ui.notify(_('{pkg} ist eine Systemkomponente und wird nicht entfernt', pkg=pkg['name']), type='negative')
+        return False
+    opts = await remove_dialog(pkg)
+    if not opts:
+        return False
+    plan = build_remove_plan(pkg, opts)
     return await _execute(state, plan, []) and not plan.dry_run

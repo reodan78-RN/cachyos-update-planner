@@ -13,10 +13,22 @@ commands as root. This document describes how that is contained.
   - `pacman -S --asdeps --needed --noconfirm …` – missing *repo* dependencies of an AUR package
   - `pacman -U --noconfirm …` – install AUR packages that were just built
   - `pacman -Rns --noconfirm …` – remove orphaned packages, only after you confirmed the displayed list
+  - `pacman -Rs[n] --noconfirm --noprogressbar <package>` – remove software you chose on the Packages page, after a
+    read-only preview (`pacman -Rsp`); kernel, glibc, systemd, pacman, drivers and similar are refused
   - `paccache -rk<N>` and `paccache -ruk0` – clean the package cache, only when selected
   - `snapper -c root create …` – only when Snapper is configured and `snap-pac` is not installed
-- Flatpak updates and `flatpak install [--user|--system] flathub <id>` run as the user; for a system-wide
-  installation Flatpak itself asks via polkit (the desktop's authentication dialog), not the planner.
+- Flatpak updates, `flatpak install` and `flatpak uninstall` run as the user, never through `sudo`.
+
+### Flatpak and authorization
+
+- A **user** installation (`--user`) needs no authorization at all.
+- A **system-wide** installation or removal is authorized by Flatpak through polkit, not by the planner. Flatpak's
+  rule `org.freedesktop.Flatpak.rules` allows members of the group `wheel` in an active local session without a
+  prompt; anyone else gets the desktop's authentication dialog. For this the planner does **not** pass
+  `--noninteractive` to system-wide operations (it would suppress that dialog); stdin is `/dev/null`, so nothing can
+  block on a question.
+- Installing an app also installs the runtimes it needs (`Installing runtime/…` in the log). It does not update
+  other apps; `flatpak update` is only run for updates you selected on the Updates page.
 - New AUR packages go through the same steps as AUR updates (clone, scan the exact PKGBUILD, build as the user,
   `pacman -U`); only the package that was asked for is installed, not every split package that was built.
 - No command is run through a shell. Package names and Flatpak IDs are validated against strict patterns before

@@ -234,3 +234,30 @@ def test_start_install_keeps_selection_after_dry_run(dialogs_env, monkeypatch):
         dialogs_env.install_dialog = dialog
         assert asyncio.run(dialogs_env.start_install(state, items)) is expected
     assert [p.dry_run for p in ran] == [True, False] and ran[0].flatpak_install == ['org.a.A']
+
+
+def test_protected_packages_are_never_removed(dialogs_env):
+    for name in ('glibc', 'systemd', 'linux-cachyos', 'nvidia-utils', 'pacman', 'mesa'):
+        assert dialogs_env.is_protected(name), name
+    for name in ('htop', 'vlc', 'org.mozilla.firefox'):
+        assert not dialogs_env.is_protected(name), name
+
+
+def test_start_remove_refuses_protected_and_keeps_state_on_dry_run(dialogs_env):
+    state = st.State()
+    ran = []
+
+    async def fake_execute(state_, plan, notes, on_start=None):
+        ran.append(plan)
+        return True
+
+    async def dialog(pkg, dry=False):
+        return {'snapshot': False, 'extra': False, 'dry_run': dry}
+    dialogs_env._execute, dialogs_env.remove_dialog = fake_execute, dialog
+    assert asyncio.run(dialogs_env.start_remove(state, dict(name='glibc', source='repo'))) is False and ran == []
+    pkg = dict(name='htop', source='repo')
+    assert asyncio.run(dialogs_env.start_remove(state, pkg)) is True
+    assert ran[0].remove == ['htop'] and ran[0].kind() == 'remove'
+    flat = dict(name='org.a.A', source='flatpak', reason='user')
+    asyncio.run(dialogs_env.start_remove(state, flat))
+    assert ran[1].flatpak_remove == ['org.a.A'] and ran[1].flatpak_remove_user is True

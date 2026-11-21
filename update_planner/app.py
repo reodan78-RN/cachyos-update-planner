@@ -28,7 +28,7 @@ ICON = Path(__file__).parent / 'static' / 'icon.png'
 NAV: list[tuple] = [
     ('/', 'Übersicht', 'dashboard', overview.page),
     ('/packages', 'Pakete', 'account_tree', packages.page,
-     [('/packages', 'Installiert'), ('/packages/install', 'Installieren')]),
+     [('/packages', 'Installiert'), ('/packages/install', 'Pakete suchen und installieren')]),
     ('/updates', 'Updates', 'system_update_alt', updates.page),
     ('/conflicts', 'Konflikte', 'call_split', conflicts.page),
     ('/security', 'Sicherheit', 'shield', security.page),

@@ -54,6 +54,19 @@ class Plan:
     install_aur: set[str] = field(default_factory=set)  # Teilmenge von `aur`, die neu installiert wird (kein Update)
     flatpak_install: list[str] = field(default_factory=list)  # neue Flatpak-IDs aus Flathub
     flatpak_user: bool = False                        # Flatpak nur für den Benutzer statt systemweit
+    remove: list[str] = field(default_factory=list)   # Repo-/AUR-Pakete entfernen (pacman -Rs[n])
+    remove_configs: bool = False                      # dabei auch Konfigurationsdateien löschen (-n)
+    flatpak_remove: list[str] = field(default_factory=list)   # Flatpak-Apps entfernen
+    flatpak_remove_user: bool = False                 # die Apps liegen in der Benutzerinstallation
+    flatpak_remove_data: bool = False                 # auch die Anwendungsdaten (~/.var/app) löschen
+
+    def kind(self) -> str:
+        """'install', 'remove' oder 'update' – bestimmt die Beschriftung (kein „Update“ bei einer Installation)."""
+        if self.install or self.install_aur or self.flatpak_install:
+            return 'install'
+        if self.remove or self.flatpak_remove:
+            return 'remove'
+        return 'update'
 
     def phases(self) -> list[str]:
         p = ['Vorbereitung']
@@ -65,6 +78,8 @@ class Plan:
             p.append('AUR')
         if self.flatpak or self.flatpak_install:
             p.append('Flatpak')
+        if self.remove or self.flatpak_remove:
+            p.append('Entfernen')
         if self.remove_orphans or self.clean_cache:
             p.append('Aufräumen')
         p.append('Abschluss')
@@ -224,19 +239,25 @@ class Runner:
             await self._aur()
         if self.plan.flatpak or self.plan.flatpak_install:
             await self._flatpak()
+        if self.plan.remove or self.plan.flatpak_remove:
+            await self._remove()
         if 'Aufräumen' in self._phases:
             await self._cleanup()
         await self._finish()
 
     async def _prepare(self) -> None:
         self._enter('Vorbereitung')
-        self._log(_(':: Update Planner – Probelauf gestartet') if self.plan.dry_run else _(':: Update Planner – Update gestartet'))
+        started = {'install': _(':: Update Planner – Installation gestartet'), 'remove': _(':: Update Planner – Entfernen gestartet')}
+        self._log(_(':: Update Planner – Probelauf gestartet') if self.plan.dry_run
+                  else started.get(self.plan.kind(), _(':: Update Planner – Update gestartet')))
         if pacman_src.db_locked():
             raise _Abort(_('pacman-Datenbank ist gesperrt (/var/lib/pacman/db.lck).'))
         for n in [*self.plan.hold, *self.plan.install, *(n for n, _b in self.plan.aur),
                   *(b for _n, b in self.plan.aur)]:
             valid_name(n)
-        for ref in [*self.plan.flatpak, *self.plan.flatpak_install]:
+        for n in self.plan.remove:
+            valid_name(n)
+        for ref in [*self.plan.flatpak, *self.plan.flatpak_install, *self.plan.flatpak_remove]:
             valid_flatpak(ref)
         self._pacnew_before = set(await asyncio.to_thread(pacman_src.pacnew_files))
         self._progress(1.0)
@@ -404,9 +425,7 @@ class Runner:
                 if rc != 0:
                     self.result.errors.append(_('flatpak update beendet mit {rc}', rc=rc))
         for i, ref in enumerate(new):
-            # als Benutzer; bei Systeminstallation fragt Flatpak selbst über polkit (KDE-Dialog) nach
-            cmd = ['flatpak', 'install', '-y', '--noninteractive', '--user' if self.plan.flatpak_user else '--system',
-                   'flathub', ref]
+            cmd = _flatpak_cmd('install', self.plan.flatpak_user) + ['flathub', ref]
             if self.plan.dry_run:
                 self._log(_(':: Probelauf: {cmd}', cmd=' '.join(cmd)))
             else:
@@ -419,6 +438,42 @@ class Runner:
             self.result.updated.append(ref)
             self._progress((i + 1) / len(new))
         self.result.updated.append('Flatpak')
+        self._progress(1.0)
+
+    async def _remove(self) -> None:
+        self._enter('Entfernen')
+        names = [valid_name(n) for n in self.plan.remove]
+        refs = [valid_flatpak(x) for x in self.plan.flatpak_remove]
+        if names:
+            flags = '-Rns' if self.plan.remove_configs else '-Rs'
+            if self.plan.dry_run:
+                out: list[str] = []
+                rc = await self._stream(['pacman', '-Rsp', '--print-format', '%n', *names], on_line=out.append)
+                gone, broken = pacman_src.parse_removal('\n'.join(out))
+                if broken:
+                    raise _Abort(_('Entfernen nicht möglich – davon abhängig: {pkgs}', pkgs=', '.join(broken[:8])))
+                self._log(_(':: Probelauf: {n} Pakete würden entfernt: {pkgs}', n=len(gone), pkgs=', '.join(gone)))
+            else:
+                rc = await self._stream(['pacman', flags, '--noconfirm', '--noprogressbar', *names], sudo=True)
+            if rc != 0:
+                raise _Abort(_('pacman beendet mit Fehlercode {rc} – siehe Protokoll.', rc=rc))
+            self.result.updated.append('Entfernen')
+        for i, ref in enumerate(refs):
+            cmd = _flatpak_cmd('uninstall', self.plan.flatpak_remove_user)
+            if self.plan.flatpak_remove_data:
+                cmd.append('--delete-data')
+            cmd.append(ref)
+            if self.plan.dry_run:
+                self._log(_(':: Probelauf: {cmd}', cmd=' '.join(cmd)))
+            else:
+                rc = await self._stream(cmd)
+                if rc != 0:
+                    self.result.errors.append(_('flatpak uninstall beendet mit {rc}', rc=rc))
+                    self.result.ok = False
+                    self.result.skipped.append(ref)
+                    continue
+            self.result.updated.append(ref)
+            self._progress((i + 1) / len(refs))
         self._progress(1.0)
 
     async def _cleanup(self) -> None:
@@ -474,6 +529,13 @@ class Runner:
         self.result.reboot = not self.plan.dry_run and not Path(f'/usr/lib/modules/{kernel}').exists()
         self._log(_(':: Fertig') + (_(' – Neustart erforderlich (Kernel ersetzt)') if self.result.reboot else ''))
         self._progress(1.0)
+
+
+def _flatpak_cmd(verb: str, user: bool) -> list[str]:
+    """flatpak install/uninstall ohne Rückfragen. `--noninteractive` unterdrückt auch den Polkit-Dialog; das darf nur
+    für die Benutzerinstallation (keine Autorisierung nötig) gelten, sonst scheitern systemweite Vorgänge, wo Polkit
+    nachfragen müsste (Mitglieder von „wheel“ werden meist ohne Abfrage zugelassen). stdin ist /dev/null."""
+    return ['flatpak', verb, '-y', *(['--noninteractive'] if user else []), '--user' if user else '--system']
 
 
 _RE_TOTAL = re.compile(r'^Packages \((\d+)\)')

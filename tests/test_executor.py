@@ -246,7 +246,9 @@ def test_flatpak_install_arguments(calls, user, flag):
     assert 'Flatpak' in plan.phases() and 'Repo' not in plan.phases()
     r = asyncio.run(executor.Runner(plan, cbs([]), None, {}).run())
     assert r.ok
-    assert [c for c, _ in calls] == [['flatpak', 'install', '-y', '--noninteractive', flag, 'flathub', 'org.gimp.GIMP']]
+    # systemweit ohne --noninteractive, sonst unterdrückt es den Polkit-Dialog; als Benutzer ohne Rückfragen
+    expected = ['flatpak', 'install', '-y', *(['--noninteractive'] if user else []), flag, 'flathub', 'org.gimp.GIMP']
+    assert [c for c, _ in calls] == [expected]
     assert all(c[0] != 'sudo' for c, _ in calls)                      # als Benutzer, polkit fragt Flatpak selbst
 
 
@@ -295,3 +297,62 @@ def test_aur_update_of_not_installed_package_is_skipped(calls, monkeypatch, tmp_
     plan = executor.Plan(repo=False, snapshot=False, aur=[('foo', 'foo')], reviewed={'foo'})
     r = asyncio.run(executor.Runner(plan, _cbs_answer([], True, []), SECRET, {}).run())
     assert r.skipped == ['foo'] and not any(c[:2] == ['pacman', '-U'] for c in _no_sudo_cmds(calls))
+
+
+def test_flatpak_install_never_updates_other_apps(calls):
+    plan = executor.Plan(repo=False, snapshot=False, flatpak_install=['org.a.A'], flatpak_user=True)
+    asyncio.run(executor.Runner(plan, cbs([]), None, {}).run())
+    assert all(c[1] != 'update' for c, _ in calls) and len(calls) == 1
+
+
+def test_plan_kind_names_the_action():
+    assert executor.Plan().kind() == 'update'
+    assert executor.Plan(repo=False, flatpak_install=['a.b']).kind() == 'install'
+    assert executor.Plan(repo=False, install=['htop']).kind() == 'install'
+    assert executor.Plan(repo=False, remove=['htop']).kind() == 'remove'
+    assert 'Entfernen' in executor.Plan(repo=False, remove=['htop']).phases()
+    assert 'Entfernen' in executor.Plan(repo=False, flatpak_remove=['a.b']).phases()
+
+
+@pytest.mark.parametrize('configs, flags', [(False, '-Rs'), (True, '-Rns')])
+def test_remove_runs_pacman_with_sudo_and_stdin_password(calls, configs, flags):
+    plan = executor.Plan(repo=False, snapshot=False, remove=['htop', 'btop'], remove_configs=configs)
+    r = asyncio.run(executor.Runner(plan, cbs([]), SECRET, {}).run())
+    assert r.ok and r.updated == ['Entfernen']
+    cmd, proc = calls[0]
+    assert cmd[:6] == ['sudo', '-S', '-k', '-p', '', '--']
+    assert cmd[6:] == ['pacman', flags, '--noconfirm', '--noprogressbar', 'htop', 'btop']
+    assert proc.stdin.data == (SECRET + '\n').encode() and all(SECRET not in a for c, _ in calls for a in c)
+
+
+def test_remove_dry_run_is_read_only(calls):
+    plan = executor.Plan(repo=False, snapshot=False, dry_run=True, remove=['htop'], flatpak_remove=['org.a.A'])
+    r = asyncio.run(executor.Runner(plan, cbs([]), None, {}).run())
+    assert r.ok and all(c[0] != 'sudo' for c, _ in calls)
+    assert calls[0][0][:2] == ['pacman', '-Rsp'] and len(calls) == 1          # Flatpak wird nur protokolliert
+
+
+def test_remove_dry_run_reports_broken_dependencies(monkeypatch, calls):
+    async def fake(*cmd, **kw):
+        return FakeProc(["checking dependencies...", ":: removing glibc breaks dependency 'glibc' required by zstd"])
+    monkeypatch.setattr(asyncio, 'create_subprocess_exec', fake)
+    plan = executor.Plan(repo=False, snapshot=False, dry_run=True, remove=['glibc'])
+    r = asyncio.run(executor.Runner(plan, cbs([]), None, {}).run())
+    assert not r.ok and 'zstd' in r.errors[0]
+
+
+@pytest.mark.parametrize('user, expected', [
+    (True, ['flatpak', 'uninstall', '-y', '--noninteractive', '--user', '--delete-data', 'org.a.A']),
+    (False, ['flatpak', 'uninstall', '-y', '--system', 'org.a.A']),
+])
+def test_flatpak_remove_arguments(calls, user, expected):
+    plan = executor.Plan(repo=False, snapshot=False, flatpak_remove=['org.a.A'], flatpak_remove_user=user,
+                         flatpak_remove_data=user)
+    r = asyncio.run(executor.Runner(plan, cbs([]), None, {}).run())
+    assert r.ok and [c for c, _ in calls] == [expected]
+
+
+@pytest.mark.parametrize('field, value', [('remove', ['ok', '-Rdd']), ('flatpak_remove', ['--user'])])
+def test_remove_names_are_validated(calls, field, value):
+    r = asyncio.run(executor.Runner(executor.Plan(repo=False, snapshot=False, **{field: value}), cbs([]), SECRET, {}).run())
+    assert not r.ok and calls == []

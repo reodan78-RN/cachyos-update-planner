@@ -6,7 +6,7 @@ The planner is laid out like a monitoring dashboard:
 
 - **System bar** (top, dark): logo, the source filter (Repo, AUR, Flatpak), the time of the last check,
   *Check for updates* and the theme switch (dark → light → system). Dark is the default.
-- **App navigation** (below): Overview, Packages (menu: *Installed*, *Install*), Updates, Conflicts, Security,
+- **App navigation** (below): Overview, Packages (menu: *Installed*, *Search and install packages*), Updates, Conflicts, Security,
   AUR Scanner.
 - **Scheduled update:** when an update is scheduled, a chip *Update scheduled HH:MM* appears in the system bar;
   the × cancels the plan.
@@ -34,6 +34,17 @@ All installed packages with origin, version and number of dependencies. Click a 
 graph (two levels down plus the packages that depend on it, trimmed for large trees). Orange rings mark packages
 with an update, red rings packages involved in a potential incompatibility. Mouse wheel zooms, dragging moves nodes.
 
+### Removing software
+
+Select a package and press **Remove …**. The dialog first asks pacman what would really go (`pacman -Rsp`): the
+package plus dependencies nobody else needs. If other packages depend on it, the dialog says which and the button
+stays disabled; system components (kernel, glibc, systemd, pacman, graphics drivers …) are never removed. Options:
+a snapshot first, deleting configuration files as well (`-n`; otherwise `.pacsave` files stay) and a **dry run**.
+Repo and AUR packages are removed with `pacman -Rs[n]` and need the sudo password. Flatpak apps are removed with
+`flatpak uninstall` in the scope they were installed in, optionally with their data in `~/.var/app`; no sudo
+password is needed (see *Flatpak and authorization* in the security document). Flatpak runtimes are not offered –
+`flatpak uninstall --unused` removes the ones nobody uses.
+
 The **Security** column marks every package listed in the Arch Linux Security Tracker with its highest severity
 (critical, high, medium, low), plus the number of entries when there is more than one. Sort by this column or tick
 *Affected only*. In the graph, affected packages get a solid ring in the severity color; a dashed red ring marks a
@@ -41,7 +52,7 @@ potential incompatibility and a dotted green ring an available update.
 
 ## Install new packages
 
-*Packages → Install* searches for software you do not have yet.
+*Packages → Search and install packages* searches for software you do not have yet.
 
 - **Source:** CachyOS/Arch repos, AUR or Flatpak (Flathub). The repo list shows where a package comes from
   (*CachyOS* for the `cachyos*` repos, otherwise *Arch*).

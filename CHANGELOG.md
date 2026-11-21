@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.2 – 2026-11-21
+
+- **Remove software:** the Packages page has a **Remove …** button. The dialog previews what `pacman -Rsp` would
+  remove (and blocks when other packages depend on it), refuses system components, offers snapshot, deleting
+  configuration files and a dry run. Flatpak apps are removed in their own scope, optionally with their data.
+- **Clearer wording:** installations and removals no longer say "Update" (dialog titles, log); the menu entry is now
+  *Search and install packages* (*Pakete suchen und installieren*).
+- **Flatpak authorization:** system-wide Flatpak installs/removals no longer use `--noninteractive`, which suppressed the
+  polkit dialog; the install dialog explains that Flatpak needs no sudo password.
+
 ## 1.3.1 – 2026-11-21
 
 - **Install page:** the start list of repo packages (no search term) now shows only packages that no other repo

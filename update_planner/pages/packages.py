@@ -7,6 +7,7 @@ from .. import state as st
 from ..i18n import _
 from .. import theme
 from ..theme import card
+from ..dialogs import is_protected, start_remove
 from .overview import dashboard_header, loading_card
 
 MAX_NODES = 60
@@ -158,6 +159,8 @@ def page() -> None:
                 title = ui.label().classes('section-title')
                 info = ui.label().classes('muted text-sm')
                 vuln_line = ui.label().classes('font-medium')
+                remove_btn = ui.button(_('Entfernen …'), icon='delete').props('flat dense color=negative') \
+                    .classes('self-start')
                 chart = ui.echart(graph_options(current['name'])).classes('w-full').style('height:520px')
                 with ui.row().classes('gap-4 text-xs muted'):
                     for color, label in [(theme.RED, _('Sicherheitslücke kritisch')), (theme.ORANGE, _('hoch')),
@@ -181,9 +184,18 @@ def page() -> None:
                                 sev=_(v['severity']), ids=', '.join(v['ids'][:4])) if v else '')
             vuln_line.style(f'color:{theme.SEVERITY_COLOR[v["severity"]]}' if v else '')
             vuln_line.set_visibility(bool(v))
+            # Flatpak-Runtimes (ID mit „//“) räumt `flatpak uninstall --unused` auf; Systemkomponenten nie entfernen
+            remove_btn.set_visibility('//' not in name)
+            remove_btn.set_enabled(not is_protected(name) and md.ready())
             chart.options.clear()
             chart.options.update(graph_options(name))
             chart.update()
+
+        async def remove() -> None:
+            pkg = md.package(current['name'])
+            if pkg and await start_remove(s, pkg):
+                content.refresh()
+        remove_btn.on_click(remove)
 
         table.on('rowClick', lambda e: show(e.args[1]['name']))
         chart.on_point_click(lambda e: md.package(e.name) and show(e.name))
