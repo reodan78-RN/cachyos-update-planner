@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **Install page:** the start list of repo packages (no search term) now shows only packages that no other repo
+  package depends on, so it lists software instead of libraries (htop, vlc, gparted … instead of python-wheel, zlib …).
+
 ## 1.3.0 – 2026-11-21
 
 - **Install new packages:** new page *Packages → Install* (`/packages/install`). Search the CachyOS/Arch repos,

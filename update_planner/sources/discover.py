@@ -29,7 +29,7 @@ PKGSTATS_PAGES = 5                      # ~36 000 Pakete, 10 000 pro Seite (API-
 AUR_SEARCH = 'https://aur.archlinux.org/rpc/v5/search/{term}?by=name-desc'
 FLATHUB_POPULAR = 'https://flathub.org/api/v2/collection/popular?page=1&per_page={n}'
 FLATHUB_SEARCH = 'https://flathub.org/api/v2/search'
-TOP = 50                                # Startliste ohne Suchbegriff
+TOP = 50                                # Startliste ohne Suchbegriff (nur Blatt-Pakete, siehe pacman.leaf_packages)
 MAX_RESULTS = 200
 TERM_RE = re.compile(r'^[\w.+-]{1,64}$')
 FEW_VOTES = 10
@@ -203,6 +203,11 @@ async def repo(term: str, warn=None) -> list[dict]:
     else:
         out = await asyncio.to_thread(run, ['pacman', '-Sl', *_db()], timeout=60)
         found = [dict(repo=r, name=n, version=v, desc='') for n, (r, v, inst) in parse_sl(out).items() if not inst]
+        try:                                  # Startliste: nur Programme, keine Bibliotheken/Module (nichts hängt davon ab)
+            leaves = await asyncio.to_thread(pacman.leaf_packages)
+            found = [r for r in found if r['name'] in leaves] or found
+        except Exception as exc:  # noqa: BLE001 – ohne Filter zeigt die Liste alles, wie zuvor
+            log.warning('Abhängigkeitsfilter nicht verfügbar: %s', exc)
     pop: dict[str, float] = {}
     try:
         pop = await popularity()

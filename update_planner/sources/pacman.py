@@ -63,6 +63,36 @@ def installed() -> dict[str, Installed]:
     return pkgs
 
 
+def parse_leaves(text: str) -> set[str]:
+    """Aus `expac -S '%n<US>%E<US>%P'` (Name, Abhängigkeiten ohne Version, Provides): Pakete, von denen KEIN anderes
+    Paket abhängt – weder über den Namen noch über ein Provides (Sonames, virtuelle Pakete). Das sind die Programme, die
+    man bewusst installiert; Bibliotheken und Module erscheinen nur als Abhängigkeit."""
+    rows: list[tuple[str, set[str]]] = []
+    required: set[str] = set()
+    for line in text.split('\n'):
+        f = line.split(SEP)
+        if len(f) != 3 or not f[0]:
+            continue
+        provides = {re.split(r'[<>=]', p, maxsplit=1)[0] for p in _split(f[2])} | {f[0]}
+        required.update(d for d in _split(f[1]))
+        rows.append((f[0], provides))
+    return {name for name, provides in rows if not provides & required}
+
+
+_LEAVES: tuple[float, set[str]] | None = None
+
+
+def leaf_packages(ttl: float = 6 * 3600) -> set[str]:
+    """Blatt-Pakete der Sync-Datenbanken (6 h im Speicher; die Auswertung braucht ~0,3 s)."""
+    global _LEAVES
+    import time
+    if _LEAVES and time.time() - _LEAVES[0] < ttl:
+        return _LEAVES[1]
+    leaves = parse_leaves(run(['expac', '-S', SEP.join(['%n', '%E', '%P']), '-l', LIST], timeout=120))
+    _LEAVES = (time.time(), leaves)
+    return leaves
+
+
 def check_updates() -> list[RepoUpdate]:
     """checkupdates synchronisiert eine private Kopie der Datenbank – das System bleibt unberührt."""
     config.ensure_dirs()

@@ -334,3 +334,19 @@ def test_flathub_needs_flatpak(monkeypatch):
     monkeypatch.setattr(discover, 'have', lambda tool: False)
     with pytest.raises(RuntimeError):
         asyncio.run(discover.flathub(''))
+
+
+def test_leaf_packages_exclude_dependencies_and_providers():
+    S, L = pacman.SEP, pacman.LIST
+    rows = [
+        ('firefox', L.join(['glibc', 'libfoo.so', 'gtk3']), ''),            # Programm: nichts hängt davon ab
+        ('glibc', '', ''),                                                  # von firefox benötigt
+        ('libfoo', '', L.join(['libfoo.so=1-64'])),                         # über Soname-Provides benötigt
+        ('gtk3', '', ''),
+        ('jack2', '', L.join(['jack=1.9'])),                                # Provider eines virtuellen Pakets
+        ('ardour', 'jack', ''),                                             # hängt von „jack“ ab → jack2 ist Abhängigkeit
+        ('htop', '', ''),
+    ]
+    text = '\n'.join(S.join(r) for r in rows) + '\n'
+    assert pacman.parse_leaves(text) == {'firefox', 'ardour', 'htop'}
+    assert pacman.parse_leaves('') == set() and pacman.parse_leaves('kaputt\n') == set()

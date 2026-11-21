@@ -46,7 +46,8 @@ potential incompatibility and a dotted green ring an available update.
 - **Source:** CachyOS/Arch repos, AUR or Flatpak (Flathub). The repo list shows where a package comes from
   (*CachyOS* for the `cachyos*` repos, otherwise *Arch*).
 - **Search:** by name or keyword (also in descriptions); several words must all match. Without a term the 50
-  most popular repo and Flatpak packages are shown. Installed packages are hidden in every source. The AUR needs at
+  most popular repo and Flatpak packages are shown; the repo list leaves out packages that other repo packages
+  depend on (libraries, modules), so it shows software you would install on purpose. Installed packages are hidden in every source. The AUR needs at
   least two characters (it has no full list); the AUR is searched for the longest word and the other words are
   matched locally.
 - **Popularity:** repo packages show the pkgstats share of reporting systems, AUR packages the AUR popularity and
