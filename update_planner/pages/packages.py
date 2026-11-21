@@ -101,7 +101,7 @@ def graph_options(center: str) -> dict:
 
 def page() -> None:
     s = st.get()
-    current = {'name': ''}
+    current = {'name': '', 'picked': ''}     # angezeigtes Paket / per Auswahlfeld markiertes Paket (zum Entfernen)
 
     @ui.refreshable
     def content() -> None:
@@ -134,7 +134,7 @@ def page() -> None:
                         ui.icon('search')
                     only_vuln = ui.checkbox(_('Nur betroffene ({n})', n=affected), value=False).props('dense')
                 table = ui.table(
-                    rows=rows, row_key='id',
+                    rows=rows, row_key='id', selection='single',
                     columns=[
                         {'name': 'name', 'label': _('Paket'), 'field': 'name', 'sortable': True, 'align': 'left'},
                         {'name': 'src', 'label': _('Quelle'), 'field': 'src', 'sortable': True, 'align': 'left'},
@@ -146,6 +146,7 @@ def page() -> None:
                     pagination={'rowsPerPage': 12},
                 ).classes('w-full cursor-pointer').props('flat dense')
                 table.add_slot('body-cell-sec', SEC_SLOT)
+                table.selected = [r for r in rows if r['id'] == current['picked']]
                 search.bind_value_to(table, 'filter')
 
                 def apply_filter(e) -> None:
@@ -155,20 +156,27 @@ def page() -> None:
                     table.update()
                 only_vuln.on_value_change(apply_filter)
 
-            with card('xl:col-span-3'):
-                title = ui.label().classes('section-title')
-                info = ui.label().classes('muted text-sm')
-                vuln_line = ui.label().classes('font-medium')
-                remove_btn = ui.button(_('Entfernen …'), icon='delete').props('flat dense color=negative') \
-                    .classes('self-start')
-                chart = ui.echart(graph_options(current['name'])).classes('w-full').style('height:520px')
-                with ui.row().classes('gap-4 text-xs muted'):
-                    for color, label in [(theme.RED, _('Sicherheitslücke kritisch')), (theme.ORANGE, _('hoch')),
-                                         (theme.YELLOW, _('mittel')), (theme.BLUE, _('niedrig'))]:
-                        ui.html(f'<span style="color:{color}">●</span> ' + escape(label), sanitize=False)
-                    ui.html(f'<span style="color:{theme.RED}">◌</span> ' + escape(_('potenzielle Inkompatibilität')), sanitize=False)
-                    ui.html(f'<span style="color:{theme.GREEN}">◌</span> ' + escape(_('Update verfügbar')), sanitize=False)
-                    ui.label(_('Mausrad: Zoom · Ziehen: Knoten verschieben'))
+            with ui.column().classes('xl:col-span-3 gap-2'):
+                # Entfernen steht bewusst abseits der Tabelle und ist erst aktiv, wenn ein Paket per Auswahlfeld markiert ist
+                with ui.row().classes('w-full items-center justify-end gap-3'):
+                    remove_hint = ui.label().classes('muted text-sm')
+                    remove_btn = ui.button(_('Ausgewähltes Paket entfernen …'), icon='delete') \
+                        .props('outline color=negative')
+                    remove_btn.disable()
+                with card('w-full'):
+                    title = ui.label().classes('section-title')
+                    info = ui.label().classes('muted text-sm')
+                    vuln_line = ui.label().classes('font-medium')
+                    chart = ui.echart(graph_options(current['name'])).classes('w-full').style('height:520px')
+                    with ui.row().classes('gap-4 text-xs muted'):
+                        for color, label in [(theme.RED, _('Sicherheitslücke kritisch')), (theme.ORANGE, _('hoch')),
+                                             (theme.YELLOW, _('mittel')), (theme.BLUE, _('niedrig'))]:
+                            ui.html(f'<span style="color:{color}">●</span> ' + escape(label), sanitize=False)
+                        ui.html(f'<span style="color:{theme.RED}">◌</span> ' + escape(_('potenzielle Inkompatibilität')),
+                                sanitize=False)
+                        ui.html(f'<span style="color:{theme.GREEN}">◌</span> ' + escape(_('Update verfügbar')),
+                                sanitize=False)
+                        ui.label(_('Mausrad: Zoom · Ziehen: Knoten verschieben'))
 
         def show(name: str) -> None:
             current['name'] = name
@@ -184,16 +192,36 @@ def page() -> None:
                                 sev=_(v['severity']), ids=', '.join(v['ids'][:4])) if v else '')
             vuln_line.style(f'color:{theme.SEVERITY_COLOR[v["severity"]]}' if v else '')
             vuln_line.set_visibility(bool(v))
-            # Flatpak-Runtimes (ID mit „//“) räumt `flatpak uninstall --unused` auf; Systemkomponenten nie entfernen
-            remove_btn.set_visibility('//' not in name)
-            remove_btn.set_enabled(not is_protected(name) and md.ready())
             chart.options.clear()
             chart.options.update(graph_options(name))
             chart.update()
 
+        def update_remove_button() -> None:
+            name = current['picked']
+            if not name:
+                remove_btn.text, hint = _('Ausgewähltes Paket entfernen …'), _('Zum Entfernen links ein Paket per Auswahlfeld markieren')
+                remove_btn.disable()
+            elif '//' in name:                       # Flatpak-Runtimes räumt `flatpak uninstall --unused` auf
+                remove_btn.text, hint = _('„{name}“ entfernen …', name=name), _('Runtimes werden nicht einzeln entfernt')
+                remove_btn.disable()
+            elif is_protected(name):
+                remove_btn.text, hint = _('„{name}“ entfernen …', name=name), _('Systemkomponente – wird nicht entfernt')
+                remove_btn.disable()
+            else:
+                remove_btn.text, hint = _('„{name}“ entfernen …', name=name), ''
+                remove_btn.set_enabled(md.ready())
+            remove_hint.text = hint
+
+        def on_pick() -> None:
+            current['picked'] = table.selected[0]['id'] if table.selected else ''
+            update_remove_button()
+        table.on_select(on_pick)
+        update_remove_button()
+
         async def remove() -> None:
-            pkg = md.package(current['name'])
+            pkg = md.package(current['picked'])
             if pkg and await start_remove(s, pkg):
+                current['picked'] = ''
                 content.refresh()
         remove_btn.on_click(remove)
 

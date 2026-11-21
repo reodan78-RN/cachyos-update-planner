@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.3 – 2026-11-21
+
+- **Safer removal:** a package must be ticked with the checkbox in the Packages list first; the **Remove selected
+  package …** button sits above the dependency graph and is only enabled for a ticked package (never for system
+  components or Flatpak runtimes). A confirmation dialog ("Really remove …?") shows pacman's preview before anything happens.
+
 ## 1.3.2 – 2026-11-21
 
 - **Remove software:** the Packages page has a **Remove …** button. The dialog previews what `pacman -Rsp` would

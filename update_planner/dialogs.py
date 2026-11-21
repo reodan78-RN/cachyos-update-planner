@@ -572,7 +572,7 @@ async def remove_dialog(pkg: dict) -> dict | None:
     with card:
         with ui.row().classes('items-center gap-3 no-wrap'):
             ui.icon('delete', size='28px').classes('text-negative')
-            ui.label(_('„{name}“ entfernen', name=name)).classes('text-xl font-semibold')
+            ui.label(_('Soll „{name}“ wirklich entfernt werden?', name=name)).classes('text-xl font-semibold')
         if flat:
             ui.label(_('Die Flatpak-App wird {scope} entfernt.',
                        scope=_('für den Benutzer') if pkg.get('reason') == 'user' else _('systemweit'))).classes('text-sm')

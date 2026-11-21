@@ -36,7 +36,9 @@ with an update, red rings packages involved in a potential incompatibility. Mous
 
 ### Removing software
 
-Select a package and press **Remove …**. The dialog first asks pacman what would really go (`pacman -Rsp`): the
+Tick the checkbox in front of a package and press **Remove selected package …** above the dependency graph (the
+button stays disabled until a package is ticked, so it cannot be hit by accident). A confirmation dialog asks "Really
+remove …?" and first asks pacman what would really go (`pacman -Rsp`): the
 package plus dependencies nobody else needs. If other packages depend on it, the dialog says which and the button
 stays disabled; system components (kernel, glibc, systemd, pacman, graphics drivers …) are never removed. Options:
 a snapshot first, deleting configuration files as well (`-n`; otherwise `.pacsave` files stay) and a **dry run**.
