@@ -36,7 +36,7 @@ class Schedule:
     deselected: list[str] = field(default_factory=list)
     selected_extra: list[str] = field(default_factory=list)   # bewusst zusätzlich gewählt (nicht in der Standardauswahl)
     sources: list[str] = field(default_factory=list)
-    reviewed: list[str] = field(default_factory=list)
+    reviewed: dict[str, str] = field(default_factory=dict)   # {Paket: Hash des geprüften PKGBUILD}
     created: float = 0.0
 
 
@@ -99,7 +99,8 @@ def load() -> Schedule | None:
                                 deselected=[str(x) for x in data.get('deselected', [])],
                                 selected_extra=[str(x) for x in data.get('selected_extra', [])],
                                 sources=[str(x) for x in data.get('sources', [])],
-                                reviewed=[str(x) for x in data.get('reviewed', [])],
+                                reviewed={str(k): str(v) for k, v in data.get('reviewed', {}).items()}
+                                if isinstance(data.get('reviewed'), dict) else {},   # alte Liste ohne Hash → verworfen
                                 created=float(data.get('created', 0)))
         except (OSError, ValueError, KeyError, TypeError):
             _current = None
@@ -119,7 +120,7 @@ def schedule(at: float, opts: dict, deselected, sources, reviewed, selected_extr
     global _current, _loaded, _claimed_by, _notified
     opts = {k: v for k, v in opts.items() if k != 'at'}
     sch = Schedule(at=at, opts=opts, deselected=sorted(deselected), selected_extra=sorted(selected_extra),
-                   sources=sorted(sources), reviewed=sorted(reviewed), created=time.time())
+                   sources=sorted(sources), reviewed=dict(reviewed), created=time.time())
     _write(sch)
     _current, _loaded, _claimed_by, _notified = sch, True, None, None
     return sch

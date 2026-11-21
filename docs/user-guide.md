@@ -140,6 +140,8 @@ version (taken from the paru, yay or planner cache).
 
 - **Check AUR package:** enter any package name to fetch and scan it *before* installing it.
 - **Own PKGBUILD:** paste a PKGBUILD and scan it locally.
+- **Mark as reviewed:** after you read a flagged package you can approve it. The approval is tied to the exact
+  `PKGBUILD` you reviewed – if it changes later, the scanner asks again before building.
 - **Verdicts:** Harmless (< 15), Suspicious (15–39), Review manually (40–69), Dangerous (≥ 70).
 
 The scanner matches text patterns. It helps you decide where to look; it does not replace reading the PKGBUILD.

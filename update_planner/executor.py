@@ -46,7 +46,7 @@ class Plan:
     flatpak: list[str] = field(default_factory=list)
     snapshot: bool = True
     dry_run: bool = False
-    reviewed: set[str] = field(default_factory=set)    # trotz Scanner-Warnung freigegeben
+    reviewed: dict[str, str] = field(default_factory=dict)    # trotz Scanner-Warnung freigegeben: {Paket: Hash des geprüften Inhalts}
     remove_orphans: bool = False                      # nach dem Update verwaiste Pakete anbieten (Rückfrage)
     clean_cache: bool = False                         # Paket-Cache mit paccache aufräumen
     cache_keep: int = 2                               # so viele Versionen je Paket behalten
@@ -154,7 +154,8 @@ class Runner:
         self._idx = 0
         logdir = config.CACHE / 'logs'
         logdir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self._logpath = logdir / time.strftime('update-%Y%m%d-%H%M%S.log')
+        now = time.time()
+        self._logpath = logdir / (time.strftime('update-%Y%m%d-%H%M%S', time.localtime(now)) + f'-{int(now * 1000) % 1000:03d}.log')   # ms: zwei Läufe in derselben Sekunde kollidieren nicht
         fd = os.open(self._logpath, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         self._logfile = os.fdopen(fd, 'w', buffering=1)
         self.result.log_file = str(self._logpath)
@@ -368,12 +369,19 @@ class Runner:
             raise _Skip(_('kein PKGBUILD im AUR-Repository'))
         text = (d / 'PKGBUILD').read_text(errors='replace')
         findings = aur_scanner.scan_text(text, 'PKGBUILD')
+        texts = [text]
         inst = re.search(r'^\s*install=["\']?([\w.+-]+)', text, re.M)
         if inst and (d / inst.group(1)).is_file():
-            findings += aur_scanner.scan_text((d / inst.group(1)).read_text(errors='replace'), inst.group(1))
+            texts.append((d / inst.group(1)).read_text(errors='replace'))
+            findings += aur_scanner.scan_text(texts[-1], inst.group(1))
+        # Freigabe gilt nur für den Inhalt, der geprüft wurde – nicht für den Paketnamen
+        reviewed_hash = self.plan.reviewed.get(name)
+        approved = bool(reviewed_hash) and reviewed_hash == aur_scanner.review_hash(texts)
+        if reviewed_hash and not approved:
+            self._log(_(':: {pkg}: PKGBUILD hat sich seit der manuellen Prüfung geändert – Freigabe gilt nicht mehr', pkg=name))
         scan = aur_scanner.ScanResult(name, findings)
         self._log(_(':: PKGBUILD-Scan {pkg}: {verdict} (Score {score}, {n} Befunde)', pkg=name, verdict=_(scan.verdict[0]), score=scan.score, n=len(findings)))
-        if scan.score >= 40 and name not in self.plan.reviewed:
+        if scan.score >= 40 and not approved:
             worst = sorted(findings, key=lambda f: aur_scanner.SEVERITY_ORDER.index(f.severity))[0]
             if not await self.cb.ask(_('{pkg}: verdächtige Muster', pkg=name),
                                      _('{n} Befunde, u. a. „{title}“ ({where}). Paket trotzdem bauen?', n=len(findings),

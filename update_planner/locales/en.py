@@ -559,4 +559,6 @@ MESSAGES: dict[str, str] = {
     'Systemkomponente – wird nicht entfernt': 'System component – will not be removed',
     'Zum Entfernen links ein Paket per Auswahlfeld markieren': 'To remove, tick a package in the list on the left',
     '„{name}“ entfernen …': 'Remove “{name}” …',
+    ':: {pkg}: PKGBUILD hat sich seit der manuellen Prüfung geändert – Freigabe gilt nicht mehr': ':: {pkg}: the PKGBUILD changed since the manual review – approval no longer applies',
+    'Keine Dateien zum Prüfen vorhanden': 'No files available to review',
 }

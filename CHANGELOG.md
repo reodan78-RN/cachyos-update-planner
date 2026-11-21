@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.4 – 2026-11-21
+
+- **Security:** *Mark as reviewed* in the AUR scanner is now bound to a SHA-256 of the reviewed `PKGBUILD`/`.install`.
+  A changed file invalidates the approval (also in scheduled plans, which now store the hash); the scanner asks again
+  before building. Name-only approvals from older plans are discarded.
+- Log files get a millisecond suffix, so two runs in the same second can no longer collide.
+
 ## 1.3.3 – 2026-11-21
 
 - **Safer removal:** a package must be ticked with the checkbox in the Packages list first; the **Remove selected

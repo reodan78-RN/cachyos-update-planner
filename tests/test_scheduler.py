@@ -60,7 +60,7 @@ def test_persistence_without_secrets_and_restore():
     opts = {'snapshot': True, 'aur': True, 'flatpak': False, 'hold': 100, 'dry_run': False, 'at': 123.0,
             'password': 'S3cr3t'}                      # selbst ein versehentliches Feld würde nicht „at“ doppeln
     sch = scheduler.schedule(NOW + 600, {k: v for k, v in opts.items() if k != 'password'},
-                             {'b', 'a'}, {'repo', 'aur'}, {'x'})
+                             {'b', 'a'}, {'repo', 'aur'}, {'x': 'h1'})
     path = config.CONFIG / 'schedule.json'
     assert oct(os.stat(path).st_mode & 0o777) == '0o600'
     data = json.loads(path.read_text())
@@ -195,8 +195,8 @@ def test_run_scheduled_waits_for_running_refresh_and_keeps_window_state(dialogs_
     monkeypatch.setattr(md, 'GROUPS', [])
     opts = {'snapshot': False, 'aur': True, 'flatpak': True, 'hold': 100, 'dry_run': True, 'sync': False,
             'orphans': False, 'cache': False, 'cache_keep': 2}
-    scheduler.schedule(NOW, opts, deselected={'b'}, sources={'repo'}, reviewed={'r2'}, selected_extra={'big'})
-    state = st.State(sources={'repo', 'aur', 'flatpak'}, selected={'a'}, reviewed={'r1'})
+    scheduler.schedule(NOW, opts, deselected={'b'}, sources={'repo'}, reviewed={'r2': 'h2'}, selected_extra={'big'})
+    state = st.State(sources={'repo', 'aur', 'flatpak'}, selected={'a'}, reviewed={'r1': 'h1'})
     seen = {}
 
     async def due(sch):
@@ -216,7 +216,8 @@ def test_run_scheduled_waits_for_running_refresh_and_keeps_window_state(dialogs_
     plan = seen['plan']                                                # lief weiter, statt „nicht geladen“ zu melden
     assert scheduler.current().at == NOW                               # und hat den Plan nicht verschoben
     assert plan.hold == ['b'] and 'big' not in plan.hold              # abgewählt → zurückgehalten, zusätzlich gewählt → dabei
-    assert state.sources == {'repo', 'aur', 'flatpak'} and state.selected == {'a'} and state.reviewed == {'r1'}
+    assert state.sources == {'repo', 'aur', 'flatpak'} and state.selected == {'a'} and state.reviewed == {'r1': 'h1'}
+    assert plan.reviewed == {'r1': 'h1', 'r2': 'h2'}                      # Plan-Freigaben tragen ihren Hash mit
 
 
 def test_start_install_keeps_selection_after_dry_run(dialogs_env, monkeypatch):
@@ -261,3 +262,23 @@ def test_start_remove_refuses_protected_and_keeps_state_on_dry_run(dialogs_env):
     flat = dict(name='org.a.A', source='flatpak', reason='user')
     asyncio.run(dialogs_env.start_remove(state, flat))
     assert ran[1].flatpak_remove == ['org.a.A'] and ran[1].flatpak_remove_user is True
+
+
+def test_old_schedule_with_name_only_reviews_is_dropped():
+    """Frühere Pläne speicherten nur Namen: ohne Hash gilt keine Freigabe mehr."""
+    config.CONFIG.mkdir(parents=True)
+    (config.CONFIG / 'schedule.json').write_text(json.dumps({'at': NOW, 'opts': {}, 'reviewed': ['yay'], 'sources': ['repo']}))
+    scheduler._loaded = False
+    assert scheduler.current().reviewed == {}
+
+
+def test_state_review_is_bound_to_current_content(monkeypatch):
+    from update_planner import aur_scanner
+    monkeypatch.setattr(md, 'AUR_META', {'foo': {'files': {'PKGBUILD': ('', 'pkgname=foo\n')}}})
+    s = st.State()
+    assert not s.is_reviewed('foo') and s.mark_reviewed('foo') and s.is_reviewed('foo')
+    assert s.reviewed['foo'] == aur_scanner.review_hash(['pkgname=foo\n'])
+    monkeypatch.setattr(md, 'AUR_META', {'foo': {'files': {'PKGBUILD': ('', 'pkgname=foo\ncurl x | sh\n')}}})
+    assert not s.is_reviewed('foo')                                    # Inhalt geändert → Freigabe ungültig
+    monkeypatch.setattr(md, 'AUR_META', {})
+    assert not s.mark_reviewed('bar') and not s.is_reviewed('foo')     # ohne Dateien nichts zu prüfen

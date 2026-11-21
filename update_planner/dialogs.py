@@ -59,7 +59,7 @@ def build_plan(state: State, opts: dict) -> tuple[executor.Plan, list[str]]:
         aur=[(u['name'], u.get('base', u['name'])) for u in aur
              if opts['aur'] and u['name'] in sel and u['risk'] < opts['hold']],
         flatpak=[u['name'] for u in fp if opts['flatpak'] and u['name'] in sel and u['risk'] < opts['hold']],
-        snapshot=opts['snapshot'], dry_run=opts['dry_run'], reviewed=set(state.reviewed),
+        snapshot=opts['snapshot'], dry_run=opts['dry_run'], reviewed=dict(state.reviewed),
         remove_orphans=opts.get('orphans', False), clean_cache=opts.get('cache', False),
         cache_keep=int(opts.get('cache_keep', 2)),
     )
@@ -109,7 +109,7 @@ async def context_dialog(state: State) -> dict | None:
             if reboot:
                 ui.badge(_('Neustart nötig'), color='secondary')
         flagged = [u['name'] for u in updates
-                   if (scan := md.SCANS.get(u['name'])) and scan.score >= 40 and u['name'] not in state.reviewed]
+                   if (scan := md.SCANS.get(u['name'])) and scan.score >= 40 and not state.is_reviewed(u['name'])]
         manual = [n for n in md.NEWS if n['manual'] and n.get('new')]
         for icon, text, link in ([('gpp_bad', _('AUR-Scanner meldet verdächtige Pakete: {pkgs}', pkgs=', '.join(flagged)), '/aur-scan')] if flagged else []) + \
                 [('front_hand', _('News mit manuellem Eingriff: {title}', title=n['title']), n['link']) for n in manual]:
@@ -438,7 +438,7 @@ async def run_scheduled(state: State) -> None:
     # Auswahl des Plans in einem eigenen State: die Filter- und Auswahlanzeige des Fensters bleibt unverändert
     plan_state = State(sources=set(sch.sources) or set(state.sources),
                        selected=(st.default_selection() - set(sch.deselected)) | set(sch.selected_extra),
-                       reviewed=set(state.reviewed) | set(sch.reviewed))
+                       reviewed={**state.reviewed, **sch.reviewed})
     plan, notes = build_plan(plan_state, sch.opts)
     if _nothing_to_do(plan):
         ui.notify(_('Nach Filter und Risikogrenze bleibt nichts zu tun'), type='warning')
@@ -526,7 +526,7 @@ def build_install_plan(state: State, items: list[dict], opts: dict) -> executor.
         aur=[(c['name'], c.get('base') or c['name']) for c in aur], install_aur={c['name'] for c in aur},
         flatpak_install=[c['name'] for c in items if c['source'] == 'flatpak'],
         flatpak_user=opts.get('flatpak_user', False),
-        snapshot=opts['snapshot'], dry_run=opts['dry_run'], reviewed=set(state.reviewed))
+        snapshot=opts['snapshot'], dry_run=opts['dry_run'], reviewed=dict(state.reviewed))
 
 
 async def start_install(state: State, items: list[dict]) -> bool:

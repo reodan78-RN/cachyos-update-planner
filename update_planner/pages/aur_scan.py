@@ -240,10 +240,12 @@ def page() -> None:
                         ui.notify(_('{pkg} vom Update ausgeschlossen', pkg=r.package), position='top-right')
 
                     def reviewed():
-                        s.reviewed.add(r.package)
+                        if not s.mark_reviewed(r.package):
+                            ui.notify(_('Keine Dateien zum Prüfen vorhanden'), type='warning', position='top-right')
+                            return
                         ui.notify(_('{pkg} als manuell geprüft markiert', pkg=r.package), type='positive', position='top-right')
                         content.refresh()
-                    if r.package in s.reviewed:
+                    if s.is_reviewed(r.package):
                         ui.chip(_('manuell geprüft'), icon='task_alt', color='positive').props('outline')
                     ui.button(_('Vom Update ausschließen'), icon='block', on_click=hold).props('flat no-caps')
                     ui.button(_('Als geprüft markieren'), icon='task_alt', on_click=reviewed).props('flat no-caps')

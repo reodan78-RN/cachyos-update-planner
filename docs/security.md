@@ -36,8 +36,9 @@ commands as root. This document describes how that is contained.
 
 ## Scheduled updates
 
-- A schedule stores the time, the dialog options, the *deselected* updates, the source filter and the packages you
-  reviewed in `~/.config/update-planner/schedule.json` (mode `0600`). **No password and no other secret** is stored.
+- A schedule stores the time, the dialog options, the *deselected* and the deliberately added updates, the source
+  filter and your manual AUR reviews (package name plus the SHA-256 of the reviewed files, see below) in
+  `~/.config/update-planner/schedule.json` (mode `0600`). **No password and no other secret** is stored.
 - When the plan is due, the planner (it must be running) shows a desktop notification (`notify-send`, without a
   shell) and a dialog. The sudo password is asked for **only then**, exactly as for a manual update, and is held in
   memory for that run only. There is no background daemon, no systemd timer and no cached sudo ticket.
@@ -52,6 +53,13 @@ commands as root. This document describes how that is contained.
 - Tests (`tests/test_executor.py`) assert that the password is never in arguments, the live log or the log file.
 
 ## AUR builds
+
+- **Manual review is bound to the content.** *Mark as reviewed* in the AUR scanner stores the package name together
+  with a SHA-256 over the reviewed `PKGBUILD` (and `.install`). The approval only counts while the files are
+  identical: before building, the executor hashes the cloned files again, and if the hash differs (new version,
+  maintainer takeover, tampering) it logs that the approval no longer applies and asks again whenever the score is
+  40 or more. The same check decides whether the update dialog still lists a package as flagged. Plans saved by
+  version 1.3.2 and earlier contain names without hashes; such approvals are discarded.
 
 - The AUR scanner runs during loading and **again on the exact PKGBUILD that is about to be built**, right after
   cloning. A score of 40 or more asks for confirmation before building.

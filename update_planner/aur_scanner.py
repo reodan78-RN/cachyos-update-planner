@@ -7,6 +7,7 @@ angewendet. Ein Scan ersetzt kein Lesen des PKGBUILD, er priorisiert nur, wo man
 from __future__ import annotations
 
 import difflib
+import hashlib
 import re
 from dataclasses import dataclass, field
 from datetime import date
@@ -267,3 +268,12 @@ def diff(old: str, new: str, filename: str) -> list[tuple[str, str]]:
             continue
         out.append((line[0] if line[0] in '+-@' else ' ', line))
     return out
+
+
+def review_hash(texts) -> str:
+    """Fingerabdruck der geprüften Dateien (PKGBUILD und ggf. .install), unabhängig von Reihenfolge und Dateinamen.
+
+    „Als geprüft markiert“ gilt nur für genau diesen Inhalt: ändert sich das PKGBUILD danach (neue Version,
+    Maintainer-Übernahme), passt der Hash nicht mehr und der Scanner fragt wieder nach."""
+    digests = sorted(hashlib.sha256(t.encode('utf-8', 'replace')).hexdigest() for t in texts)
+    return hashlib.sha256('\n'.join(digests).encode()).hexdigest()

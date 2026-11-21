@@ -7,6 +7,7 @@ from typing import Callable
 
 from nicegui import app
 
+from . import aur_scanner
 from . import catalog as md
 
 
@@ -23,11 +24,20 @@ def default_selection() -> set[str]:
     return sel
 
 
+def current_review_hash(name: str) -> str | None:
+    """Hash der aktuell bekannten Dateien eines AUR-Pakets (aus den Scan-Eingaben des Katalogs)."""
+    meta = md.AUR_META.get(name)
+    files = (meta or {}).get('files') or {}
+    if not files:
+        return None
+    return aur_scanner.review_hash(new for _old, new in files.values())
+
+
 @dataclass
 class State:
     sources: set[str] = field(default_factory=lambda: {'repo', 'aur', 'flatpak'})
     selected: set[str] = field(default_factory=set)
-    reviewed: set[str] = field(default_factory=set)  # im AUR-Scanner manuell geprüft
+    reviewed: dict[str, str] = field(default_factory=dict)  # im AUR-Scanner manuell geprüft: {Paket: Hash des geprüften Inhalts}
     seen_version: int = -1
     busy: bool = False                                # Update läuft
     on_change: Callable[[], None] | None = None
@@ -39,6 +49,18 @@ class State:
         self.seen_version = md.VERSION
         self.selected = default_selection()
         return True
+
+    def mark_reviewed(self, name: str) -> bool:
+        """Aktuellen Inhalt (PKGBUILD/.install) als geprüft merken. False, wenn er nicht vorliegt."""
+        digest = current_review_hash(name)
+        if digest:
+            self.reviewed[name] = digest
+        return bool(digest)
+
+    def is_reviewed(self, name: str) -> bool:
+        """Nur wenn der Inhalt noch derselbe ist wie bei der Prüfung."""
+        stored = self.reviewed.get(name)
+        return bool(stored) and stored == current_review_hash(name)
 
     def visible_updates(self) -> list[dict]:
         return [u for u in md.UPDATES if u['source'] in self.sources]
