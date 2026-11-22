@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+Security review follow-up.
+
+- **AUR scanner:** function context is tracked properly (braces in strings, `${…}`, comments and here-docs no longer
+  shift it; one-line and `function name {` functions; `package_*()` split functions count as `package`). Top-level
+  commands and `$(…)` in assignments are checked like build code, `.install` files are checked as install code on
+  every line, and an unrecognisable structure applies the context rules to the whole file (new info finding
+  `AUR000`). `.install` files referenced as `$pkgname.install` are now fetched and scanned too.
+- **Review approvals** hash the package name and each *(file name, content)* pair. Existing approvals no longer match
+  and are asked for again once.
+- **Preflight** before any change: required programs, free space, repo packages to install exist, removal would not
+  break dependencies (previously only checked in a dry run).
+- **AUR install:** only packages named in the plan are installed; artefacts that would replace an installed repo
+  package are refused; dependencies from `.SRCINFO` are validated and passed after `--`; split packages build once.
+- **Processes:** every child is terminated and reaped (SIGTERM → SIGKILL) on timeout, error or cancellation,
+  including the `sudo -v` password check; `git` has a 10-minute limit; `\r\n` split across read chunks no longer
+  yields an empty line.
+- **Network/cache:** requests and redirects only go to the known hosts; cache files are `0600`, never followed through
+  symlinks, size-checked; stale cache fallbacks are shown as a warning with their age.
+- **Schedule file** is validated strictly (types, ranges, names, at most 31 days ahead) and ignored if implausible;
+  scheduling more than 31 days ahead is refused.
+- CVE detail lookups only swallow network/format errors; programming errors are logged and raised. Remote AUR and
+  tracker data are type-checked.
+- Log files no longer collide when two runs start in the same millisecond.
+
 ## 1.4.1 – 2026-11-22
 
 - **Tray icon:** the count now matches the planner – AUR updates are included, and the tray re-checks when the

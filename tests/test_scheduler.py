@@ -277,8 +277,50 @@ def test_state_review_is_bound_to_current_content(monkeypatch):
     monkeypatch.setattr(md, 'AUR_META', {'foo': {'files': {'PKGBUILD': ('', 'pkgname=foo\n')}}})
     s = st.State()
     assert not s.is_reviewed('foo') and s.mark_reviewed('foo') and s.is_reviewed('foo')
-    assert s.reviewed['foo'] == aur_scanner.review_hash(['pkgname=foo\n'])
+    assert s.reviewed['foo'] == aur_scanner.review_hash({'PKGBUILD': 'pkgname=foo\n'}, 'foo')
     monkeypatch.setattr(md, 'AUR_META', {'foo': {'files': {'PKGBUILD': ('', 'pkgname=foo\ncurl x | sh\n')}}})
     assert not s.is_reviewed('foo')                                    # Inhalt geändert → Freigabe ungültig
     monkeypatch.setattr(md, 'AUR_META', {})
     assert not s.mark_reviewed('bar') and not s.is_reviewed('foo')     # ohne Dateien nichts zu prüfen
+
+
+# ------------------------------------------------------------------ Review 1.5.0: Datei streng prüfen
+
+def _valid(**over):
+    data = dict(at=NOW + 600, created=NOW, opts={'snapshot': True, 'aur': True, 'flatpak': False, 'hold': 100,
+                                                  'dry_run': False, 'sync': False, 'cache_keep': 2},
+                deselected=['a'], selected_extra=[], sources=['repo'], reviewed={'x': 'a' * 64})
+    data.update(over)
+    return data
+
+
+def test_parse_accepts_what_the_dialog_writes():
+    sch = scheduler.parse(_valid(), now=NOW)
+    assert sch.at == NOW + 600 and sch.opts['hold'] == 100 and sch.reviewed == {'x': 'a' * 64}
+
+
+@pytest.mark.parametrize('over', [
+    {'at': float('nan')}, {'at': float('inf')}, {'at': 'soon'}, {'at': True}, {'at': -1},
+    {'at': NOW + 40 * 86400},                                      # zu weit in der Zukunft
+    {'created': NOW + 86400},                                      # „erstellt“ in der Zukunft
+    {'created': NOW - 60 * 86400, 'at': NOW - 60 * 86400 + 40 * 86400},   # at weit hinter created
+    {'opts': {'snapshot': 'yes'}}, {'opts': {'hold': True}}, {'opts': {'hold': 500}},
+    {'opts': {'cache_keep': 99}}, {'opts': {'shell': 'rm -rf /'}}, {'opts': []},
+    {'deselected': ['--ignore']}, {'deselected': 'abc'}, {'selected_extra': [1]},
+    {'sources': ['repo', 'evil']}, {'reviewed': {'x': 1}}, {'reviewed': {'-x': 'h'}},
+])
+def test_parse_rejects_tampered_or_unreasonable_data(over):
+    with pytest.raises(ValueError):
+        scheduler.parse(_valid(**over), now=NOW)
+
+
+def test_tampered_file_is_ignored_not_acted_on():
+    config.CONFIG.mkdir(parents=True)
+    (config.CONFIG / 'schedule.json').write_text(json.dumps(_valid(at=time.time() + 400 * 86400)))
+    scheduler._loaded = False
+    assert scheduler.current() is None and not scheduler.due()
+
+
+def test_compute_rejects_too_far_ahead():
+    with pytest.raises(ValueError):
+        scheduler.compute_at('time', day=date(2027, 6, 1), clock=dtime(10, 0), now=NOW)

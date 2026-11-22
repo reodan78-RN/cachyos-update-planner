@@ -40,7 +40,7 @@ def test_fetch_rejects_oversized(monkeypatch, tmp_path):
 
     async def go():
         async with httpx.AsyncClient(transport=transport) as c:
-            await sysutil.fetch('https://example.org/big', client=c, ttl=0)
+            await sysutil.fetch('https://aur.archlinux.org/big', client=c, ttl=0)
     with pytest.raises(sysutil.CommandError):
         asyncio.run(go())
 
@@ -142,15 +142,148 @@ def test_peer_uid_reads_proc_table(tmp_path):
 def test_https_client_refuses_redirect_to_http():
     import httpx
 
+    seen = []
+
     def handler(request):
+        seen.append(str(request.url))
         if request.url.scheme == 'https':
-            return httpx.Response(302, headers={'location': 'http://example.org/x'})
+            return httpx.Response(302, headers={'location': 'http://aur.archlinux.org/x'})
         return httpx.Response(200, content=b'ok')
 
     async def go():
         client = sysutil.https_client()
         client._transport = httpx.MockTransport(handler)
         async with client:
-            await client.get('https://example.org/')
+            await client.get('https://aur.archlinux.org/')
     with pytest.raises(sysutil.CommandError):
         asyncio.run(go())
+    assert seen == ['https://aur.archlinux.org/']            # die http://-Anfrage wurde gar nicht erst gestellt
+
+
+# ------------------------------------------------------------------ Review 1.5.0: Hosts, Cache, veraltete Daten
+
+@pytest.mark.parametrize('url, ok', [
+    ('https://aur.archlinux.org/rpc', True), ('https://security.archlinux.org/x.json', True),
+    ('https://archlinux.org/feeds/news/', True), ('https://pkgstats.archlinux.de/api', True),
+    ('https://cachyos.org/rss.xml', True), ('https://flathub.org/api/v2/search', True),
+    ('http://aur.archlinux.org/rpc', False), ('https://evil-archlinux.org/', False),
+    ('https://archlinux.org.evil.example/', False), ('https://example.org/', False),
+])
+def test_host_allowlist(url, ok):
+    assert sysutil.host_allowed(url) is ok
+
+
+def test_redirect_to_foreign_https_host_is_refused():
+    import httpx
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.host)
+        return httpx.Response(302, headers={'location': 'https://attacker.example/x'})
+
+    async def go():
+        client = sysutil.https_client()
+        client._transport = httpx.MockTransport(handler)
+        async with client:
+            await client.get('https://aur.archlinux.org/')
+    with pytest.raises(sysutil.CommandError):
+        asyncio.run(go())
+    assert seen == ['aur.archlinux.org']
+
+
+@pytest.fixture
+def http_cache(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, 'HTTP_CACHE', tmp_path / 'http')
+    monkeypatch.setattr(config, 'CACHE', tmp_path)
+    monkeypatch.setattr(config, 'AUR_BUILD', tmp_path / 'aur')
+    monkeypatch.setattr(config, 'CONFIG', tmp_path / 'cfg')
+    sysutil.STALE.clear()
+    yield tmp_path / 'http'
+    sysutil.STALE.clear()
+
+
+def _client(handler):
+    import httpx
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+def test_cache_files_are_private_and_stale_fallback_is_reported(http_cache):
+    import httpx
+    url = 'https://security.archlinux.org/issues/all.json'
+
+    async def get(handler, ttl=0):
+        async with _client(handler) as c:
+            return await sysutil.fetch(url, client=c, ttl=ttl)
+    assert asyncio.run(get(lambda r: httpx.Response(200, content=b'[1]'))) == b'[1]'
+    files = list(http_cache.iterdir())
+    assert len(files) == 1 and oct(files[0].stat().st_mode & 0o777) == '0o600'   # keine Temp-Dateien übrig
+    assert url not in sysutil.STALE
+    old = time.time() - 7200
+    os.utime(files[0], (old, old))
+    assert asyncio.run(get(lambda r: httpx.Response(503))) == b'[1]'               # Netzfehler → alter Cache
+    assert 7100 < sysutil.STALE[url] < 7300                                        # … mit Alter vermerkt
+    asyncio.run(get(lambda r: httpx.Response(200, content=b'[2]')))
+    assert url not in sysutil.STALE                                                # wieder aktuell
+
+
+def test_cache_does_not_follow_symlinks_or_accept_oversized(http_cache, monkeypatch, tmp_path):
+    import httpx
+    url = 'https://aur.archlinux.org/x'
+    http_cache.mkdir(parents=True)
+    target = tmp_path / 'elsewhere'
+    target.write_bytes(b'planted')
+    sysutil._cache_path(url).symlink_to(target)
+
+    async def get():
+        async with _client(lambda r: httpx.Response(500)) as c:
+            return await sysutil.fetch(url, client=c, ttl=3600)
+    with pytest.raises(httpx.HTTPStatusError):
+        asyncio.run(get())                                                         # Symlink zählt nicht als Cache
+    sysutil._cache_path(url).unlink()
+    sysutil._cache_path(url).write_bytes(b'x' * 100)
+    monkeypatch.setattr(config, 'MAX_DOWNLOAD', 10)
+    with pytest.raises(httpx.HTTPStatusError):
+        asyncio.run(get())                                                         # übergroßer Cache wird ignoriert
+
+
+def test_fetch_refuses_untrusted_host_before_connecting(http_cache):
+    import httpx
+    seen = []
+
+    async def go():
+        async with _client(lambda r: seen.append(r) or httpx.Response(200)) as c:
+            await sysutil.fetch('https://example.org/', client=c)
+    with pytest.raises(sysutil.CommandError):
+        asyncio.run(go())
+    assert seen == []
+
+
+def test_cve_description_errors(monkeypatch):
+    import httpx
+
+    from update_planner.sources import security
+    items = [dict(cves=['CVE-2024-0001'], description='', vector='')]
+
+    async def net_error(*a, **kw):
+        raise httpx.ConnectError('down')
+    monkeypatch.setattr(security, 'fetch_json', net_error)
+    real_sleep = asyncio.sleep
+    monkeypatch.setattr(security.asyncio, 'sleep', lambda s: real_sleep(0))
+    asyncio.run(security.describe(items))                                         # Netzfehler: Feld bleibt leer
+    assert items[0]['description'] == ''
+
+    async def bug(*a, **kw):
+        raise KeyError('programming error')
+    monkeypatch.setattr(security, 'fetch_json', bug)
+    with pytest.raises(KeyError):
+        asyncio.run(security.describe(items))                                     # Programmierfehler wird sichtbar
+
+
+def test_advisories_reject_unexpected_shape(monkeypatch):
+    from update_planner.sources import security
+
+    async def fake(url, **kw):
+        return {'not': 'a list'}
+    monkeypatch.setattr(security, 'fetch_json', fake)
+    with pytest.raises(sysutil.CommandError):
+        asyncio.run(security.advisories())

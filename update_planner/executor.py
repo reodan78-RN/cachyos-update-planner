@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import shutil
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -22,7 +23,7 @@ from pathlib import Path
 from . import aur_scanner, config
 from .i18n import _
 from .sources import pacman as pacman_src
-from .sysutil import env_c, valid_flatpak, valid_name
+from .sysutil import env_c, have, valid_flatpak, valid_name
 
 SUDO = ['sudo', '-S', '-k', '-p', '']
 AUR_GIT = 'https://aur.archlinux.org/{base}.git'
@@ -30,6 +31,13 @@ READ_CHUNK = 64 * 1024
 MAX_LINE = 1024 * 1024          # längere „Zeilen“ (z. B. Compiler-Ausgaben ohne \n) werden zerteilt
 UI_LINE = 2000                  # in der Oberfläche gekürzt, im Protokoll vollständig
 _LINE_SPLIT = re.compile(rb'\r\n|\r|\n')
+TERM_GRACE = 5.0                # nach SIGTERM so lange warten, dann SIGKILL
+GIT_TIMEOUT = 600.0             # git clone/fetch eines AUR-Repos
+MIN_FREE_ROOT = 2 * 1024 ** 3   # freier Platz auf / und im Paket-Cache vor einem Repo-Update
+MIN_FREE_BUILD = 1024 ** 3      # freier Platz im AUR-Bauverzeichnis
+PACMAN_CACHE = Path('/var/cache/pacman/pkg')
+# Eine Abhängigkeit aus .SRCINFO: Name, optional mit Versionsbedingung (nie mit „-“ beginnend → keine Option)
+DEP_RE = re.compile(r'[a-zA-Z0-9@_+][a-zA-Z0-9@._+-]*(?:(?:<=|>=|<|>|=)[A-Za-z0-9._:+~-]+)?')
 
 _RUNNING = asyncio.Lock()       # nur ein Update-Lauf gleichzeitig – auch über mehrere Fenster hinweg
 
@@ -116,17 +124,44 @@ async def check_password(password: str, timeout: float = 30) -> bool:
     try:
         await asyncio.wait_for(proc.communicate((password + '\n').encode()), timeout)
     except (TimeoutError, BrokenPipeError, ConnectionResetError):
-        _terminate(proc)
         return False
+    finally:
+        await _reap(proc)                  # auch bei Zeitüberschreitung/Abbruch: stdin zu, beenden, abwarten
     return proc.returncode == 0
 
 
-def _terminate(proc) -> None:
-    if proc.returncode is None:
+def _signal(proc, kill: bool) -> None:
+    try:
+        proc.kill() if kill else proc.terminate()
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+async def _reap(proc, grace: float | None = None) -> None:
+    """Prozess sicher beenden und einsammeln: stdin schließen, SIGTERM, nach `grace` Sekunden SIGKILL, dann wait().
+
+    Läuft auch, wenn der aufrufende Task gerade abgebrochen wird – es bleibt kein Kind (und kein wartendes sudo)
+    zurück. Ein bereits beendeter Prozess wird nur noch eingesammelt."""
+    grace = TERM_GRACE if grace is None else grace
+    stdin = getattr(proc, 'stdin', None)
+    if stdin is not None:
         try:
-            proc.terminate()
-        except (ProcessLookupError, PermissionError):
+            stdin.close()
+        except (OSError, RuntimeError):
             pass
+    if proc.returncode is not None:
+        return
+    _signal(proc, kill=False)
+    try:
+        await asyncio.shield(asyncio.wait_for(proc.wait(), grace))
+        return
+    except (TimeoutError, asyncio.CancelledError):
+        pass
+    _signal(proc, kill=True)
+    try:
+        await asyncio.shield(asyncio.wait_for(proc.wait(), grace))
+    except (TimeoutError, asyncio.CancelledError):
+        pass
 
 
 async def _read_lines(stream):
@@ -134,12 +169,16 @@ async def _read_lines(stream):
     buf = b''
     while chunk := await stream.read(READ_CHUNK):
         buf += chunk
-        *lines, buf = _LINE_SPLIT.split(buf)
+        cr = buf.endswith(b'\r')          # \r am Stückende: gehört evtl. zu \r\n im nächsten Stück
+        *lines, buf = _LINE_SPLIT.split(buf[:-1] if cr else buf)
         for line in lines:
             yield line
+        if cr:
+            buf += b'\r'
         while len(buf) > MAX_LINE:
             yield buf[:MAX_LINE]
             buf = buf[MAX_LINE:]
+    buf = buf.rstrip(b'\r')
     if buf:
         yield buf
 
@@ -155,8 +194,15 @@ class Runner:
         logdir = config.CACHE / 'logs'
         logdir.mkdir(parents=True, exist_ok=True, mode=0o700)
         now = time.time()
-        self._logpath = logdir / (time.strftime('update-%Y%m%d-%H%M%S', time.localtime(now)) + f'-{int(now * 1000) % 1000:03d}.log')   # ms: zwei Läufe in derselben Sekunde kollidieren nicht
-        fd = os.open(self._logpath, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        stem = time.strftime('update-%Y%m%d-%H%M%S', time.localtime(now)) + f'-{int(now * 1000) % 1000:03d}'
+        for n in range(100):                      # zwei Läufe in derselben Millisekunde kollidieren nicht
+            self._logpath = logdir / (stem + (f'-{n}' if n else '') + '.log')
+            try:
+                fd = os.open(self._logpath, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                break
+            except FileExistsError:
+                if n == 99:
+                    raise
         self._logfile = os.fdopen(fd, 'w', buffering=1)
         self.result.log_file = str(self._logpath)
 
@@ -177,7 +223,10 @@ class Runner:
         self.cb.progress((self._idx + frac) / len(self._phases), frac)
 
     async def _stream(self, cmd: list[str], *, sudo: bool = False, cwd: Path | None = None,
-                      env: dict | None = None, on_line: Callable[[str], None] | None = None) -> int:
+                      env: dict | None = None, on_line: Callable[[str], None] | None = None,
+                      timeout: float | None = None) -> int:
+        """Befehl ausführen und Ausgabe zeilenweise protokollieren. Bei Zeitüberschreitung (`timeout`), Abbruch oder
+        Fehler wird der Prozess beendet und eingesammelt; Zeitüberschreitung ergibt Rückgabewert 124."""
         full = [*SUDO, '--', *cmd] if sudo else cmd
         shown = ('sudo ' if sudo else '') + ' '.join(cmd)
         self._log(f'$ {shown}')
@@ -189,24 +238,28 @@ class Runner:
             stdin=asyncio.subprocess.PIPE if sudo else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
         try:
-            if sudo:
-                try:
-                    proc.stdin.write(((self._pw or '') + '\n').encode())
-                    await proc.stdin.drain()
-                except (BrokenPipeError, ConnectionResetError):
-                    pass                          # Prozess hat schon beendet – Rückgabewert zählt
-                finally:
-                    proc.stdin.close()
-            assert proc.stdout
-            async for raw in _read_lines(proc.stdout):
-                line = raw.decode(errors='replace').rstrip()
-                if line:
-                    self._log(line)
-                    if on_line:
-                        on_line(line)
-            return await proc.wait()
+            async with asyncio.timeout(timeout):
+                if sudo:
+                    try:
+                        proc.stdin.write(((self._pw or '') + '\n').encode())
+                        await proc.stdin.drain()
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass                      # Prozess hat schon beendet – Rückgabewert zählt
+                    finally:
+                        proc.stdin.close()
+                assert proc.stdout
+                async for raw in _read_lines(proc.stdout):
+                    line = raw.decode(errors='replace').rstrip()
+                    if line:
+                        self._log(line)
+                        if on_line:
+                            on_line(line)
+                return await proc.wait()
+        except TimeoutError:
+            self._log(_('!! Zeitlimit überschritten ({s} s): {cmd}', s=int(timeout or 0), cmd=shown))
+            return 124
         finally:
-            _terminate(proc)                      # bei Abbruch/Fehler keinen Prozess verwaisen lassen
+            await _reap(proc)                     # bei Abbruch/Fehler keinen Prozess verwaisen lassen
 
     # ---------------------------------------------------------------- Ablauf
     async def run(self) -> Result:
@@ -260,8 +313,54 @@ class Runner:
             valid_name(n)
         for ref in [*self.plan.flatpak, *self.plan.flatpak_install, *self.plan.flatpak_remove]:
             valid_flatpak(ref)
+        await self._preflight()
         self._pacnew_before = set(await asyncio.to_thread(pacman_src.pacnew_files))
         self._progress(1.0)
+
+    async def _preflight(self) -> None:
+        """Alles prüfen, was sich ohne Änderung am System prüfen lässt – bevor Snapshot, pacman, AUR oder Flatpak
+        irgendetwas verändern. Schlägt etwas fehl, bricht der Lauf ab, ohne dass etwas passiert ist.
+
+        Geprüft werden: benötigte Programme, freier Speicher, ob neu zu installierende Repo-Pakete in den
+        Paketdatenbanken stehen und ob das Entfernen Abhängigkeiten bräche. Ein späterer Fehler (z. B. ein
+        Download bricht ab) ist damit nicht ausgeschlossen – dafür gibt es den Snapshot vor dem Update."""
+        p = self.plan
+        tools = {'pacman': p.repo or p.install or p.remove or p.aur or p.remove_orphans,
+                 'sudo': not p.dry_run and (p.repo or p.install or p.remove or p.aur or p.remove_orphans or p.clean_cache),
+                 'git': p.aur, 'makepkg': p.aur, 'paccache': p.clean_cache,
+                 'flatpak': p.flatpak or p.flatpak_install or p.flatpak_remove}
+        missing = [t for t, needed in tools.items() if needed and not have(t)]
+        if missing:
+            raise _Abort(_('Benötigte Programme fehlen: {tools}', tools=', '.join(missing)))
+        if not p.dry_run:
+            need = [(Path('/'), MIN_FREE_ROOT), (PACMAN_CACHE, MIN_FREE_ROOT)] if p.repo or p.install or p.aur else []
+            if p.aur:
+                need.append((config.AUR_BUILD, MIN_FREE_BUILD))
+            for path, minimum in need:
+                free = _free_bytes(path)
+                if free is not None and free < minimum:
+                    raise _Abort(_('Zu wenig freier Speicher in {path}: {free} MiB frei, mindestens {need} MiB nötig',
+                                   path=str(path), free=free // 2 ** 20, need=minimum // 2 ** 20))
+        if p.install:
+            db = ['--dbpath', str(config.CHECKUP_DB)] if (config.CHECKUP_DB / 'sync').is_dir() else []
+            out: list[str] = []
+            rc = await self._stream(['pacman', '-Sp', *db, '--logfile', '/dev/null', '--print-format', '%n',
+                                     '--', *p.install], on_line=out.append, timeout=120)
+            found = {x.strip() for x in out}
+            absent = [n for n in p.install if n not in found]
+            if rc != 0 or absent:
+                raise _Abort(_('Nicht in den Paketdatenbanken gefunden: {pkgs}', pkgs=', '.join(absent or p.install)))
+        self._removal: tuple[list[str], list[str]] | None = None
+        if p.remove:
+            out = []
+            rc = await self._stream(['pacman', '-Rsp', '--print-format', '%n', '--', *p.remove],
+                                    on_line=out.append, timeout=120)
+            gone, broken = pacman_src.parse_removal('\n'.join(out))
+            if broken:
+                raise _Abort(_('Entfernen nicht möglich – davon abhängig: {pkgs}', pkgs=', '.join(broken[:8])))
+            if rc != 0:
+                raise _Abort(_('Entfernen nicht möglich – Paket nicht installiert? (pacman {rc})', rc=rc))
+            self._removal = (gone, broken)
 
     async def _snapshot(self, kind: str) -> None:
         if kind == 'pre':
@@ -343,11 +442,17 @@ class Runner:
     async def _aur(self) -> None:
         self._enter('AUR')
         n = len(self.plan.aur)
+        self._aur_built: dict[str, set[str]] = {}    # pkgbase → dabei installierte Pakete (Split-Pakete nur einmal bauen)
         for i, (name, base) in enumerate(self.plan.aur):
             valid_name(name), valid_name(base)
             self.cb.phase(f'AUR · {name}')
             try:
-                ok = await self._aur_one(name, base)
+                if base in self._aur_built:
+                    ok = name in self._aur_built[base]
+                    if not ok:
+                        self._log(_(':: {pkg}: nicht im Build von {base} enthalten', pkg=name, base=base))
+                else:
+                    ok = await self._aur_one(name, base)
             except _Skip as exc:
                 ok = False
                 self._log(_(':: {pkg} übersprungen: {reason}', pkg=name, reason=exc))
@@ -358,25 +463,30 @@ class Runner:
         d = config.AUR_BUILD / base
         config.AUR_BUILD.mkdir(parents=True, exist_ok=True, mode=0o700)
         if (d / '.git').is_dir():
-            if await self._stream(['git', '-C', str(d), 'fetch', '--depth', '1', 'origin']) != 0 or \
-               await self._stream(['git', '-C', str(d), 'reset', '--hard', 'FETCH_HEAD']) != 0:
+            if await self._stream(['git', '-C', str(d), 'fetch', '--depth', '1', 'origin'], timeout=GIT_TIMEOUT) != 0 or \
+               await self._stream(['git', '-C', str(d), 'reset', '--hard', 'FETCH_HEAD'], timeout=GIT_TIMEOUT) != 0:
                 raise _Skip(_('git fetch fehlgeschlagen'))
-        elif await self._stream(['git', 'clone', '--depth', '1', AUR_GIT.format(base=base), str(d)]) != 0:
+        elif await self._stream(['git', 'clone', '--depth', '1', '--', AUR_GIT.format(base=base), str(d)],
+                                timeout=GIT_TIMEOUT) != 0:
             raise _Skip(_('git clone fehlgeschlagen'))
 
         # Genau das PKGBUILD scannen, das gleich gebaut wird
         if not (d / 'PKGBUILD').is_file():
             raise _Skip(_('kein PKGBUILD im AUR-Repository'))
         text = (d / 'PKGBUILD').read_text(errors='replace')
-        findings = aur_scanner.scan_text(text, 'PKGBUILD')
-        texts = [text]
-        inst = re.search(r'^\s*install=["\']?([\w.+-]+)', text, re.M)
-        if inst and (d / inst.group(1)).is_file():
-            texts.append((d / inst.group(1)).read_text(errors='replace'))
-            findings += aur_scanner.scan_text(texts[-1], inst.group(1))
-        # Freigabe gilt nur für den Inhalt, der geprüft wurde – nicht für den Paketnamen
+        files = {'PKGBUILD': text}
+        # per install= referenzierte Dateien (wie in der Oberfläche aufgelöst) und – konservativ – jede weitere
+        # .install-Datei im Repository; eine referenzierte, aber fehlende Datei zählt als leer
+        for fname in aur_scanner.install_names(text, base, name):
+            fp = d / fname
+            files[fname] = fp.read_text(errors='replace') if fp.is_file() and not fp.is_symlink() else ''
+        for fp in sorted(d.glob('*.install')):
+            if fp.name not in files and fp.is_file() and not fp.is_symlink():
+                files[fp.name] = fp.read_text(errors='replace')
+        findings = [f for fname, content in files.items() for f in aur_scanner.scan_text(content, fname)]
+        # Freigabe gilt nur für genau diese Dateien mit genau diesem Inhalt
         reviewed_hash = self.plan.reviewed.get(name)
-        approved = bool(reviewed_hash) and reviewed_hash == aur_scanner.review_hash(texts)
+        approved = bool(reviewed_hash) and reviewed_hash == aur_scanner.review_hash(files, name)
         if reviewed_hash and not approved:
             self._log(_(':: {pkg}: PKGBUILD hat sich seit der manuellen Prüfung geändert – Freigabe gilt nicht mehr', pkg=name))
         scan = aur_scanner.ScanResult(name, findings)
@@ -391,14 +501,16 @@ class Runner:
 
         # Abhängigkeiten: nur aus den Repos nachinstallieren, AUR-Abhängigkeiten nicht automatisch
         srcinfo = await asyncio.to_thread(_run_text, ['makepkg', '--printsrcinfo'], d)
-        deps = sorted({v for k, v in re.findall(r'^\s*((?:make|check)?depends(?:_x86_64)?) = (.+)$', srcinfo, re.M)})
-        missing = (await asyncio.to_thread(_run_text, ['pacman', '-T', *deps], None, (0, 127))).split() if deps else []
+        deps = parse_srcinfo_deps(srcinfo)
+        missing = (await asyncio.to_thread(_run_text, ['pacman', '-T', '--', *deps], None, (0, 127))).split() if deps else []
         if missing:
-            avail = await asyncio.to_thread(_run_text, ['pacman', '-Sp', '--print-format', '%n', *missing], None, (0, 1))
+            if any(m not in deps for m in missing):
+                raise _Skip(_('unerwartete Ausgabe von pacman -T'))
+            avail = await asyncio.to_thread(_run_text, ['pacman', '-Sp', '--print-format', '%n', '--', *missing], None, (0, 1))
             if len(avail.split()) < len(missing):
                 raise _Skip(_('benötigt Pakete, die nicht in den Repos sind ({pkgs}) – mit {helper} bauen',
                               pkgs=', '.join(missing), helper=self.sys.get('aur_helper') or 'paru'))
-            if await self._stream(['pacman', '-S', '--asdeps', '--needed', '--noconfirm', *missing], sudo=True) != 0:
+            if await self._stream(['pacman', '-S', '--asdeps', '--needed', '--noconfirm', '--', *missing], sudo=True) != 0:
                 raise _Skip(_('Abhängigkeiten konnten nicht installiert werden'))
 
         if self.plan.dry_run:
@@ -407,19 +519,44 @@ class Runner:
         env = env_c() | {'PKGDEST': str(d / 'pkg')}
         if await self._stream(['makepkg', '-f', '--noconfirm', '--cleanbuild'], cwd=d, env=env) != 0:
             raise _Skip(_('makepkg fehlgeschlagen (Quellen, Prüfsummen oder PGP-Schlüssel?)'))
+        root = d.resolve()
         pkgs = [p for p in (await asyncio.to_thread(_run_text, ['makepkg', '--packagelist'], d, (0,), env)).split()
-                if Path(p).is_file()]
+                if Path(p).is_file() and Path(p).resolve().is_relative_to(root)]
         installed = set((await asyncio.to_thread(_run_text, ['pacman', '-Qq'], None)).split())
-        names = {p: (await asyncio.to_thread(_run_text, ['pacman', '-Qqp', p], None)).strip() for p in pkgs}
-        if name in self.plan.install_aur:         # Neuinstallation: genau das gewünschte Paket (nicht „schon installiert“)
-            wanted = [p for p, n in names.items() if n == name]
+        native = set((await asyncio.to_thread(_run_text, ['pacman', '-Qqn'], None, (0, 1))).split())
+        names = {p: (await asyncio.to_thread(_run_text, ['pacman', '-Qqp', '--', p], None)).strip() for p in pkgs}
+        wanted = self._select_artifacts(name, base, names, installed, native)
+        if await self._stream(['pacman', '-U', '--noconfirm', '--noprogressbar', '--', *wanted.values()], sudo=True) != 0:
+            raise _Skip(_('Installation fehlgeschlagen'))
+        self._aur_built[base] = set(wanted)
+        return True
+
+    def _select_artifacts(self, name: str, base: str, names: dict[str, str], installed: set[str],
+                          native: set[str]) -> dict[str, str]:
+        """{Paketname: Datei} der gebauten Pakete, die installiert werden – nur aus einer expliziten Erlaubnisliste.
+
+        Erlaubt sind die Pakete des Plans mit derselben pkgbase; Neuinstallationen nur das gewünschte Paket,
+        Updates nur bereits installierte. Ein Artefakt, das ein installiertes Repo-Paket ersetzen würde, oder
+        mehrere Dateien für denselben Paketnamen stoppen das Paket ganz (das PKGBUILD baut etwas anderes als
+        angekündigt). Andere zusätzliche Artefakte (z. B. -debug) werden nur protokolliert und nicht installiert."""
+        allowed = {n for n, b in self.plan.aur if b == base}
+        if name in self.plan.install_aur:
+            allowed = {name}
         else:
-            wanted = [p for p, n in names.items() if n in installed]
+            allowed &= installed
+        seen: dict[str, str] = {}
+        for path, pkg in names.items():
+            if not pkg or pkg in seen:
+                raise _Skip(_('mehrdeutige Paketdateien für {pkg}', pkg=pkg or '?'))
+            seen[pkg] = path
+            if pkg in native and pkg not in allowed:
+                raise _Skip(_('PKGBUILD baut {pkg}, das aus den Repos installiert ist – nicht installiert', pkg=pkg))
+        wanted = {pkg: path for pkg, path in seen.items() if pkg in allowed}
+        for pkg in sorted(set(seen) - set(wanted)):
+            self._log(_(':: {pkg}: nicht angefordert, wird nicht installiert', pkg=pkg))
         if not wanted:
             raise _Skip(_('kein passendes Paket gebaut'))
-        if await self._stream(['pacman', '-U', '--noconfirm', '--noprogressbar', *wanted], sudo=True) != 0:
-            raise _Skip(_('Installation fehlgeschlagen'))
-        return True
+        return wanted
 
     async def _flatpak(self) -> None:
         self._enter('Flatpak')
@@ -454,12 +591,9 @@ class Runner:
         refs = [valid_flatpak(x) for x in self.plan.flatpak_remove]
         if names:
             flags = '-Rns' if self.plan.remove_configs else '-Rs'
-            if self.plan.dry_run:
-                out: list[str] = []
-                rc = await self._stream(['pacman', '-Rsp', '--print-format', '%n', *names], on_line=out.append)
-                gone, broken = pacman_src.parse_removal('\n'.join(out))
-                if broken:
-                    raise _Abort(_('Entfernen nicht möglich – davon abhängig: {pkgs}', pkgs=', '.join(broken[:8])))
+            if self.plan.dry_run:                 # Vorschau stammt aus der Vorabprüfung (_preflight)
+                gone = self._removal[0] if self._removal else []
+                rc = 0
                 self._log(_(':: Probelauf: {n} Pakete würden entfernt: {pkgs}', n=len(gone), pkgs=', '.join(gone)))
             else:
                 rc = await self._stream(['pacman', flags, '--noconfirm', '--noprogressbar', *names], sudo=True)
@@ -551,6 +685,35 @@ _RE_CHECK = re.compile(r'checking (keyring|package integrity|for file conflicts|
 _RE_DL = re.compile(r'download(ing|ed)')
 _RE_STEP = re.compile(r'^\(\s*(\d+)/(\d+)\) (upgrading|installing|reinstalling|downgrading|removing)')
 _RE_PACNEW = re.compile(r'warning: (\S+) installed as (\S+\.pacnew)')
+
+
+def parse_srcinfo_deps(srcinfo: str) -> list[str]:
+    """depends/makedepends/checkdepends (auch _x86_64) aus `makepkg --printsrcinfo`, je Zeile ein Eintrag.
+
+    .SRCINFO kennt keine Alternativen – jede Zeile ist eine Abhängigkeit, optional mit Versionsbedingung
+    (`foo>=1.2`), die pacman -T/-S direkt verstehen. Alles andere (z. B. etwas, das mit „-“ beginnt und als
+    Option gelesen würde) bricht das Paket ab, statt an sudo pacman durchgereicht zu werden."""
+    deps: list[str] = []
+    for m in re.finditer(r'^\s*(?:make|check)?depends(?:_x86_64)? = (.*)$', srcinfo, re.M):
+        dep = m.group(1).strip()
+        if not dep:
+            continue                              # leere Überschreibung in einem Split-Paket
+        if not DEP_RE.fullmatch(dep) or len(dep) > 256:
+            raise _Skip(_('ungültige Abhängigkeit im PKGBUILD: {dep}', dep=repr(dep[:80])))
+        if dep not in deps:
+            deps.append(dep)
+    return sorted(deps)
+
+
+def _free_bytes(path: Path) -> int | None:
+    """Freier Platz auf dem Dateisystem von `path` (oder dem nächsten vorhandenen Elternverzeichnis)."""
+    for p in (path, *path.parents):
+        if p.exists():
+            try:
+                return shutil.disk_usage(p).free
+            except OSError:
+                return None
+    return None
 
 
 class _Abort(Exception):

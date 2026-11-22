@@ -136,47 +136,161 @@ class ScanResult:
         return next((s for s in SEVERITY_ORDER if self.count(s)), 'info')
 
 
-def _strip_comment(line: str) -> str:
-    out, quote = [], None
-    for ch in line:
-        if quote:
-            if ch == quote:
-                quote = None
-        elif ch in '\'"':
-            quote = ch
-        elif ch == '#':
-            break
-        out.append(ch)
-    return ''.join(out)
+BUILD_FUNCS = frozenset({'prepare', 'build', 'check', 'package', 'pkgver'})
+ANY = None                     # Kontext unbekannt: funktionsgebundene Regeln gelten (konservativ) überall
 
-
-FUNC_RE = re.compile(r'^\s*(?:function\s+)?([A-Za-z_][\w-]*)\s*\(\)\s*\{?')
-SKIP_RE = re.compile(r'^\s*(sha\d+sums|b2sums|md5sums)(_\w+)?=\(')
+FUNC_RE = re.compile(r'^\s*(?:function\s+([A-Za-z_][\w:.-]*)\s*(?:\(\s*\))?|([A-Za-z_][\w:.-]*)\s*\(\s*\))\s*')
+ASSIGN_RE = re.compile(r'^\s*(?:(?:local|declare|typeset|export|readonly)\s+(?:-\w+\s+)*)?[A-Za-z_]\w*(\[[^\]]*\])?\+?=')
+HEREDOC_RE = re.compile(r'(?<!<)<<(-?)\s*([\'"]?)([A-Za-z_][\w-]*)\2')
+INSTALL_RE = re.compile(r'^\s*install=["\']?([^"\'\s;)]+)', re.MULTILINE)
+SKIP_RE = re.compile(r'^\s*(sha\d+sums|b2sums|md5sums|cksums)(_\w+)?=\(')
 VCS_RE = re.compile(r'(git|svn|hg|bzr|fossil)\+|\.git\b')
 
 
+def _lex(raw: str, quote: str | None) -> tuple[str, str, str | None]:
+    """Eine Zeile zerlegen: (Text ohne Kommentar, Struktur ohne Zeichenketten und ${…}, offenes Anführungszeichen).
+
+    Der Text wird gegen die Regeln geprüft, die Struktur nur für Klammern und Funktionsgrenzen genutzt –
+    so verschieben `"{"` oder `${pkgdir}` die Tiefe nicht. Ein `#` beginnt nur am Wortanfang einen Kommentar
+    (wie in bash), und ein über mehrere Zeilen offenes Anführungszeichen wird mitgeführt."""
+    text: list[str] = []
+    code: list[str] = []
+    i, n = 0, len(raw)
+    while i < n:
+        ch = raw[i]
+        if quote:
+            text.append(ch)
+            if ch == '\\' and quote == '"' and i + 1 < n:
+                text.append(raw[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+                code.append(ch)
+            i += 1
+            continue
+        if ch == '\\' and i + 1 < n:              # \{ ist kein Strukturzeichen
+            text.append(raw[i:i + 2])
+            code.append('__')
+            i += 2
+            continue
+        if ch in '\'"':
+            quote = ch
+            text.append(ch)
+            code.append(ch)
+            i += 1
+            continue
+        if ch == '#' and (i == 0 or raw[i - 1] in ' \t;&|()'):
+            break
+        if raw.startswith('${', i):               # Parameter-Erweiterung samt Verschachtelung überspringen
+            j, d = i + 2, 1
+            while j < n and d:
+                d += {'{': 1, '}': -1}.get(raw[j], 0)
+                j += 1
+            text.append(raw[i:j])
+            code.append('$_')
+            i = j
+            continue
+        text.append(ch)
+        code.append(ch)
+        i += 1
+    return ''.join(text), ''.join(code), quote
+
+
+@dataclass
+class _Line:
+    text: str                  # ohne Kommentar
+    func: str | None           # '' = oberste Ebene, Name der Funktion, ANY = unbekannt
+    toplevel_exec: bool        # Befehl auf oberster Ebene – läuft schon beim Einlesen (makepkg/pacman „sourcen“ die Datei)
+
+
+def _contexts(lines: list[str]) -> tuple[list[_Line], bool]:
+    """Funktionskontext jeder Zeile. Zweiter Wert False, wenn die Struktur nicht sicher erkannt wurde
+    (unausgeglichene Klammern, offene Zeichenkette, Funktionsrumpf ohne { … }) – dann gilt ANY."""
+    out: list[_Line] = []
+    stack: list[tuple[str, int]] = []         # (Funktion, Tiefe ihrer öffnenden Klammer)
+    depth, array = 0, 0
+    quote: str | None = None
+    pending: str | None = None                # Funktionskopf gesehen, { steht noch aus
+    heredoc: tuple[str, bool] | None = None   # (Endmarke, führende Tabs erlaubt)
+    certain = True
+
+    for raw in lines:
+        if heredoc:                           # Inhalt gehört zur umgebenden Funktion, ist aber keine Struktur
+            out.append(_Line(raw, stack[-1][0] if stack else '', False))
+            end = raw.lstrip('\t') if heredoc[1] else raw
+            if end.rstrip() == heredoc[0]:
+                heredoc = None
+            continue
+        was_quoted = quote is not None
+        text, code, quote = _lex(raw, quote)
+        ctx = stack[-1][0] if stack else ''
+        fm = None if was_quoted else FUNC_RE.match(code)
+        rest = code
+        if fm:
+            pending, rest = fm.group(1) or fm.group(2), code[fm.end():]
+        if pending and rest.strip() and not rest.lstrip().startswith('{'):
+            certain, pending = False, None    # z. B. Funktionsrumpf als Subshell: name() ( … )
+        array_before = array
+        for ch in rest:
+            if ch == '{':
+                depth += 1
+                if pending:
+                    stack.append((pending, depth))
+                    ctx, pending = pending, None
+            elif ch == '}':
+                if stack and stack[-1][1] == depth:
+                    stack.pop()
+                depth -= 1
+                if depth < 0:
+                    certain, depth = False, 0
+            elif not stack and not fm and ch in '()':
+                array = array + 1 if ch == '(' else max(0, array - 1)
+        plain = (ASSIGN_RE.match(code) is not None or array_before > 0
+                 or code.strip() in ('', '{', '}', '(', ')'))
+        cmd_subst = '$(' in text or '`' in text
+        toplevel = ctx == '' and not stack and not fm and pending is None
+        out.append(_Line(text, ctx, toplevel and (cmd_subst or not plain)))
+        m = HEREDOC_RE.search(text)
+        if m:
+            heredoc = (m.group(3), m.group(1) == '-')
+
+    if stack or depth or quote or pending or heredoc:
+        certain = False
+    return out, certain
+
+
+def _applies(rule: Rule, ln: _Line, install_file: bool) -> bool:
+    if rule.only_in is None or ln.func is ANY:
+        return True
+    if install_file and rule.only_in & INSTALL_FUNCS:
+        return True                           # .install wird als root eingelesen – jede Zeile zählt
+    func = 'package' if ln.func.startswith('package_') else ln.func   # Split-Pakete: package_foo()
+    if func in rule.only_in:
+        return True
+    return ln.toplevel_exec and bool(rule.only_in & BUILD_FUNCS)
+
+
 def scan_text(text: str, filename: str = 'PKGBUILD', old_text: str | None = None) -> list[Finding]:
+    """Regeln zeilenweise anwenden. Funktionsgebundene Regeln (z. B. Netzwerk in build()) gelten auch in
+    Split-Funktionen (package_*), für Befehle auf oberster Ebene, in .install-Dateien überall – und in der
+    ganzen Datei, sobald die Struktur nicht sicher erkannt wird (lieber ein Befund zu viel als einer zu wenig)."""
     findings: list[Finding] = []
     old_lines = set(old_text.splitlines()) if old_text is not None else None
-    func = ''
-    depth = 0
-    in_sums = False
     lines = text.splitlines()
+    ctxs, certain = _contexts(lines)
+    if not certain:
+        ctxs = [_Line(c.text, ANY, c.toplevel_exec) for c in ctxs]
+        findings.append(Finding('AUR000', 'info', _('Analyse'), _('Struktur nicht eindeutig erkannt'),
+                                _('Funktionsgebundene Regeln wurden auf die ganze Datei angewendet.'), filename))
+    install_file = not filename.endswith('PKGBUILD')
+    in_sums = False
 
-    for no, raw in enumerate(lines, 1):
-        line = _strip_comment(raw)
-        m = FUNC_RE.match(line)
-        if m and depth == 0:
-            func = m.group(1)
-        depth += line.count('{') - line.count('}')
-        if depth <= 0:
-            depth = 0
-            if not m:
-                func = ''
-
+    for no, (raw, ln) in enumerate(zip(lines, ctxs), 1):
+        line = ln.text
         is_new = old_lines is not None and raw not in old_lines
         for rule in RULES:
-            if rule.only_in is not None and func not in rule.only_in:
+            if not _applies(rule, ln, install_file):
                 continue
             if rule.id == 'AUR016' and (SKIP_RE.match(line) or in_sums or re.search(r"'[0-9a-f]{32,}'", line)):
                 continue
@@ -205,28 +319,46 @@ def scan_text(text: str, filename: str = 'PKGBUILD', old_text: str | None = None
     return findings
 
 
+def install_names(pkgbuild: str, pkgbase: str, pkgname: str) -> list[str]:
+    """Alle per install= referenzierten Dateien, $pkgname/$pkgbase aufgelöst (auch in package_*()).
+
+    Oberfläche und Executor nutzen dieselbe Auflösung, damit beide dieselben Dateien prüfen und denselben
+    Freigabe-Hash bilden. Nicht auflösbare Namen (z. B. mit $pkgver) werden ausgelassen."""
+    out: list[str] = []
+    for m in INSTALL_RE.finditer(pkgbuild):
+        name = m.group(1)
+        for var, val in (('pkgbase', pkgbase), ('pkgname', pkgname)):
+            name = name.replace('${' + var + '}', val).replace('$' + var, val)
+        if re.fullmatch(r'[\w.+-]+', name) and not name.startswith('.') and name not in out:
+            out.append(name)
+    return out
+
+
 def _meta_findings(name: str, meta: dict) -> list[Finding]:
     out: list[Finding] = []
     if meta.get('maintainer') is None:
         out.append(Finding('META01', 'mittel', _('Vertrauen'), _('Paket ist verwaist (kein Maintainer)'),
                            _('Jeder kann das Paket übernehmen – Änderungen genau prüfen.')))
     today = date.today()
-    old, new = meta['files'].get('PKGBUILD', ('', ''))
+    old, new = (meta.get('files') or {}).get('PKGBUILD', ('', ''))
     m_old, m_new = _header_maintainer(old), _header_maintainer(new)
     if old and m_old and m_new and m_old != m_new and not meta.get('maintainer_changed'):
         out.append(Finding('META02', 'hoch', _('Vertrauen'), _('Maintainer im PKGBUILD gewechselt ({old} → {new})', old=m_old, new=m_new),
                            _('Übernahmen kurz vor einem Update sind ein bekanntes Angriffsmuster.')))
-    if meta.get('maintainer_changed'):
-        days = (today - date.fromisoformat(meta['maintainer_changed'])).days
+    changed = _iso_date(meta.get('maintainer_changed'))
+    if changed:
+        days = (today - changed).days
         if days <= 30:
             out.append(Finding('META02', 'hoch', _('Vertrauen'),
                                _('Maintainer vor {days} Tagen gewechselt ({old} → {new})', days=days,
-                                 old=meta.get('previous_maintainer'), new=meta['maintainer']),
+                                 old=meta.get('previous_maintainer'), new=meta.get('maintainer')),
                                _('Übernahmen kurz vor einem Update sind ein bekanntes Angriffsmuster.')))
-    if meta.get('votes', 0) < 10:
+    votes = meta.get('votes', 0)
+    if not isinstance(votes, int | float) or votes < 10:
         out.append(Finding('META03', 'niedrig', _('Vertrauen'), _('Wenige Stimmen ({votes}), kaum genutzt', votes=meta.get('votes')),
                            _('Weniger Augen auf dem PKGBUILD.')))
-    if meta.get('first_submitted') and (today - date.fromisoformat(meta['first_submitted'])).days < 14:
+    first = _iso_date(meta.get('first_submitted'))
+    if first and (today - first).days < 14:
         out.append(Finding('META04', 'mittel', _('Vertrauen'), _('Paket erst vor kurzem eingereicht'),
                            _('Neue Pakete haben noch keine Prüfhistorie.')))
     if meta.get('out_of_date'):
@@ -237,6 +369,14 @@ def _meta_findings(name: str, meta: dict) -> list[Finding]:
         out.append(Finding('META06', 'hoch', _('Quelle'), _('Neue Download-Domain im Update: {hosts}', hosts=', '.join(sorted(added))),
                            _('Quellwechsel ohne Ankündigung upstream prüfen.')))
     return out
+
+
+def _iso_date(value) -> date | None:
+    """Datum aus Fremddaten (AUR-RPC); Unlesbares wird ignoriert statt den ganzen Scan abzubrechen."""
+    try:
+        return date.fromisoformat(value) if isinstance(value, str) else None
+    except ValueError:
+        return None
 
 
 def _header_maintainer(text: str) -> str | None:
@@ -270,10 +410,15 @@ def diff(old: str, new: str, filename: str) -> list[tuple[str, str]]:
     return out
 
 
-def review_hash(texts) -> str:
-    """Fingerabdruck der geprüften Dateien (PKGBUILD und ggf. .install), unabhängig von Reihenfolge und Dateinamen.
+def review_hash(files: dict[str, str], package: str = '') -> str:
+    """Fingerabdruck einer Prüf-Freigabe: Paketname plus jedes Paar (Dateiname, Inhalt) – PKGBUILD und .install.
 
-    „Als geprüft markiert“ gilt nur für genau diesen Inhalt: ändert sich das PKGBUILD danach (neue Version,
-    Maintainer-Übernahme), passt der Hash nicht mehr und der Scanner fragt wieder nach."""
-    digests = sorted(hashlib.sha256(t.encode('utf-8', 'replace')).hexdigest() for t in texts)
-    return hashlib.sha256('\n'.join(digests).encode()).hexdigest()
+    „Als geprüft markiert“ gilt nur für genau diese Dateien mit genau diesem Inhalt. Ändert sich ein Inhalt,
+    kommt eine Datei hinzu, fällt eine weg oder wird sie umbenannt, passt der Hash nicht mehr und der Scanner
+    fragt wieder nach. Die Reihenfolge spielt keine Rolle; jedem Teil wird seine Länge vorangestellt, damit sich
+    die Grenze zwischen Name und Inhalt nicht verschieben lässt."""
+    h = hashlib.sha256(b'update-planner-review-v2\0')
+    for part in (package, *(x for name in sorted(files) for x in (name, files[name]))):
+        b = part.encode('utf-8', 'replace')
+        h.update(len(b).to_bytes(8, 'big') + b)
+    return h.hexdigest()

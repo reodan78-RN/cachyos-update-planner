@@ -30,7 +30,7 @@ def current_review_hash(name: str) -> str | None:
     files = (meta or {}).get('files') or {}
     if not files:
         return None
-    return aur_scanner.review_hash(new for _old, new in files.values())
+    return aur_scanner.review_hash({fname: new for fname, (_old, new) in files.items()}, name)
 
 
 @dataclass

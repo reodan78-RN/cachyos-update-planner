@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
@@ -11,7 +10,8 @@ from urllib.parse import quote
 import httpx
 
 from .. import config
-from ..sysutil import fetch, fetch_json, https_client, valid_name, vercmp
+from ..aur_scanner import install_names
+from ..sysutil import CommandError, fetch, fetch_json, https_client, valid_name, vercmp
 
 RPC = 'https://aur.archlinux.org/rpc/v5/info'
 CGIT = 'https://aur.archlinux.org/cgit/aur.git/plain/{file}?h={base}'
@@ -35,18 +35,33 @@ async def info(names: list[str], ttl: float = 900) -> dict[str, dict]:
             chunk = [valid_name(n) for n in names[i:i + 150]]
             url = RPC + '?' + '&'.join('arg[]=' + quote(n) for n in chunk)
             data = await fetch_json(url, ttl=ttl, client=client)
-            for r in data.get('results', []):
-                result[r['Name']] = r
+            results = data.get('results') if isinstance(data, dict) else None
+            if not isinstance(results, list):
+                raise CommandError('unerwartetes Format der AUR-RPC-Antwort')
+            for r in results:
+                if isinstance(r, dict) and isinstance(r.get('Name'), str) and isinstance(r.get('Version'), str):
+                    result[r['Name']] = r
     return result
 
 
-def _date(ts: int | None) -> str | None:
-    return datetime.fromtimestamp(ts, timezone.utc).date().isoformat() if ts else None
+def _date(ts) -> str | None:
+    try:
+        return datetime.fromtimestamp(int(ts), timezone.utc).date().isoformat() if ts else None
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def _num(value, kind=int, default=0):
+    try:
+        return kind(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def meta_from_rpc(r: dict) -> dict:
     return dict(
-        maintainer=r.get('Maintainer'), votes=r.get('NumVotes', 0), popularity=float(r.get('Popularity', 0)),
+        maintainer=r.get('Maintainer') if isinstance(r.get('Maintainer'), str) else None,
+        votes=_num(r.get('NumVotes')), popularity=_num(r.get('Popularity'), float, 0.0),
         first_submitted=_date(r.get('FirstSubmitted')), last_modified=_date(r.get('LastModified')),
         out_of_date=bool(r.get('OutOfDate')), base=r.get('PackageBase', r['Name']), url=r.get('URL') or '',
         version=r.get('Version', ''), maintainer_changed=None,
@@ -66,14 +81,6 @@ def updates(foreign: dict[str, str], rpc: dict[str, dict]) -> tuple[list[dict], 
     return found, missing
 
 
-def _install_name(pkgbuild: str) -> str | None:
-    m = re.search(r'^\s*install=["\']?([^"\'\s]+)', pkgbuild, re.M)
-    if not m:
-        return None
-    name = m.group(1).replace('${pkgname}', '').replace('$pkgname', '')
-    return name if re.fullmatch(r'[\w.+-]+', name) else None
-
-
 def _old_file(base: str, file: str) -> str:
     """Zuletzt gebaute Fassung aus den Caches von paru, yay oder dem Planer selbst (für den Diff)."""
     home = Path.home()
@@ -84,23 +91,25 @@ def _old_file(base: str, file: str) -> str:
     return ''
 
 
-async def files(base: str, client: httpx.AsyncClient | None = None) -> dict[str, tuple[str, str]]:
-    """{Datei: (alt, neu)} für PKGBUILD und ggf. .install – neu direkt aus dem AUR."""
+async def files(base: str, client: httpx.AsyncClient | None = None, name: str | None = None) -> dict[str, tuple[str, str]]:
+    """{Datei: (alt, neu)} für PKGBUILD und alle per install= referenzierten Dateien – neu direkt aus dem AUR.
+
+    Eine referenzierte, aber nicht abrufbare .install-Datei wird als leerer Inhalt geführt: Der Freigabe-Hash
+    passt dann nicht zum gebauten Paket, und der Executor fragt nach, statt eine ungeprüfte Datei durchzulassen."""
     valid_name(base)
     if client is None:
         async with _client() as own:
-            return await files(base, own)
+            return await files(base, own, name)
     new_pkgbuild = (await fetch(CGIT.format(file='PKGBUILD', base=quote(base)), ttl=600,
                                 client=client)).decode(errors='replace')[:MAX_FILE]
     out = {'PKGBUILD': (await asyncio.to_thread(_old_file, base, 'PKGBUILD'), new_pkgbuild)}
-    inst = _install_name(new_pkgbuild)
-    if inst:
+    for inst in install_names(new_pkgbuild, base, name or base):
         try:
             text = (await fetch(CGIT.format(file=quote(inst), base=quote(base)), ttl=600,
                                 client=client)).decode(errors='replace')[:MAX_FILE]
-            out[inst] = (await asyncio.to_thread(_old_file, base, inst), text)
         except httpx.HTTPError:
-            pass
+            text = ''
+        out[inst] = (await asyncio.to_thread(_old_file, base, inst), text)
     return out
 
 
@@ -116,7 +125,7 @@ async def scan_inputs(names: list[str]) -> dict[str, dict]:
                 return name, None
             meta = meta_from_rpc(r)
             async with sem:
-                meta['files'] = await files(meta['base'], client)
+                meta['files'] = await files(meta['base'], client, name)
             return name, meta
 
         pairs = await asyncio.gather(*(one(n) for n in names), return_exceptions=True)
