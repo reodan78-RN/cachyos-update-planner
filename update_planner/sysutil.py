@@ -7,12 +7,16 @@ Regeln: nie shell=True, feste Locale (C) für parsebare Ausgaben, Paketnamen wer
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
+import stat
 import subprocess
+import tempfile
 import time
 from collections.abc import Sequence
 from functools import lru_cache
@@ -21,6 +25,8 @@ import httpx
 
 from . import config
 from .i18n import _
+
+log = logging.getLogger(__name__)
 
 NAME_RE = re.compile(r'^[a-zA-Z0-9@_+][a-zA-Z0-9@._+-]*$')        # pacman/AUR-Paketnamen
 FLATPAK_RE = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.-]*(//[A-Za-z0-9_.-]+)?')    # Flatpak-IDs (optional //branch), nie mit „-“ beginnend
@@ -157,49 +163,119 @@ def version_parts(version: str) -> tuple[int, list[int]]:
 
 # ------------------------------------------------------------------ HTTP mit Datei-Cache
 
+STALE: dict[str, float] = {}   # URL → Alter (s) der Cache-Daten, die nach einem Netzfehler geliefert wurden
+
+
+def host_allowed(url: str | httpx.URL) -> bool:
+    """Nur HTTPS zu den bekannten Datenquellen (config.TRUSTED_DOMAINS, samt Subdomains)."""
+    u = httpx.URL(str(url))
+    host = (u.host or '').lower().rstrip('.')
+    return u.scheme == 'https' and any(host == d or host.endswith('.' + d) for d in config.TRUSTED_DOMAINS)
+
+
+def _require_trusted(url: str | httpx.URL) -> None:
+    if not host_allowed(url):
+        raise CommandError(_('Unsichere Weiterleitung abgelehnt: {url}', url=str(url)))
+
+
+async def _check_request(request: httpx.Request) -> None:
+    """Vor jeder Anfrage – auch jeder Weiterleitung: nur HTTPS und nur vertrauenswürdige Hosts.
+    Ein Redirect auf http:// würde TLS aushebeln, einer auf einen fremden Host das Vertrauen ausweiten."""
+    _require_trusted(request.url)
+
+
 async def _require_https(response: httpx.Response) -> None:
-    """Auch nach Weiterleitungen nur HTTPS: ein Redirect auf http:// würde TLS aushebeln."""
-    if response.url.scheme != 'https':
-        raise CommandError(_('Unsichere Weiterleitung abgelehnt: {url}', url=str(response.url)))
+    _require_trusted(response.url)
 
 
 def https_client() -> httpx.AsyncClient:
-    """Gemeinsamer HTTP-Client: TLS-Prüfung, Zeitlimit, höchstens 3 Weiterleitungen, nur HTTPS."""
+    """Gemeinsamer HTTP-Client: TLS-Prüfung, Zeitlimit, höchstens 3 Weiterleitungen, nur HTTPS zu bekannten Hosts."""
     return httpx.AsyncClient(timeout=config.HTTP_TIMEOUT, follow_redirects=True, max_redirects=3,
-                             headers={'User-Agent': config.USER_AGENT}, event_hooks={'response': [_require_https]})
+                             headers={'User-Agent': config.USER_AGENT},
+                             event_hooks={'request': [_check_request], 'response': [_require_https]})
 
 
 def _cache_path(url: str):
     return config.HTTP_CACHE / hashlib.sha256(url.encode()).hexdigest()
 
 
-async def fetch(url: str, *, ttl: float = 3600, client: httpx.AsyncClient | None = None) -> bytes:
-    """GET mit TLS-Prüfung, Zeit- und Größenlimit, Cache (ttl Sekunden); bei Netzfehler alter Cache."""
+def _cache_read(path, ttl: float | None = None) -> tuple[bytes, float] | None:
+    """(Inhalt, Alter in s) oder None. Folgt keinen Symlinks, nimmt nur eigene reguläre Dateien bis MAX_DOWNLOAD."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        return None
+    with os.fdopen(fd, 'rb') as f:
+        st = os.fstat(f.fileno())
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_size > config.MAX_DOWNLOAD:
+            return None
+        age = max(0.0, time.time() - st.st_mtime)
+        if ttl is not None and age >= ttl:
+            return None
+        data = f.read(config.MAX_DOWNLOAD + 1)
+    return (data, age) if len(data) <= config.MAX_DOWNLOAD else None
+
+
+def _cache_write(path, data: bytes) -> None:
+    """Atomar und privat: eindeutige Temp-Datei (0600, O_EXCL), dann rename; Fehler kosten nur den Cache."""
+    try:
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix='.', suffix='.tmp')
+    except OSError as exc:
+        log.info('HTTP-Cache nicht schreibbar: %s', exc)
+        return
+    try:
+        with os.fdopen(fd, 'wb') as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except OSError as exc:
+        log.info('HTTP-Cache nicht schreibbar: %s', exc)
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+
+
+async def _download(client: httpx.AsyncClient, method: str, url: str, **kw) -> bytes:
+    async with client.stream(method, url, **kw) as resp:
+        resp.raise_for_status()
+        data = bytearray()
+        async for chunk in resp.aiter_bytes():
+            data += chunk
+            if len(data) > config.MAX_DOWNLOAD:
+                raise CommandError(_('Antwort zu groß: {url}', url=url))
+    return bytes(data)
+
+
+async def _cached(key: str, url: str, ttl: float, client: httpx.AsyncClient | None, method: str, **kw) -> bytes:
+    """Gemeinsamer Ablauf von fetch/post_json. Bei Netzfehler wird ein alter Cache geliefert und in STALE
+    vermerkt (mit Alter), damit die Oberfläche „nicht aktuell“ anzeigen kann statt veraltete Daten als aktuell."""
+    _require_trusted(url)
     config.ensure_dirs()
-    path = _cache_path(url)
-    if path.exists() and time.time() - path.stat().st_mtime < ttl:
-        return path.read_bytes()
+    path = _cache_path(key)
+    hit = _cache_read(path, ttl)
+    if hit:
+        return hit[0]
     own = client is None
     client = client or https_client()
     try:
-        async with client.stream('GET', url) as resp:
-            resp.raise_for_status()
-            data = bytearray()
-            async for chunk in resp.aiter_bytes():
-                data += chunk
-                if len(data) > config.MAX_DOWNLOAD:
-                    raise CommandError(_('Antwort zu groß: {url}', url=url))
-        tmp = path.with_suffix('.tmp')
-        tmp.write_bytes(data)
-        tmp.replace(path)
-        return bytes(data)
-    except (httpx.HTTPError, CommandError):
-        if path.exists():
-            return path.read_bytes()
+        data = await _download(client, method, url, **kw)
+        _cache_write(path, data)
+        STALE.pop(url, None)
+        return data
+    except (httpx.HTTPError, CommandError) as exc:
+        old = _cache_read(path)
+        if old:
+            STALE[url] = old[1]
+            log.warning('%s nicht erreichbar (%s) – Cache von vor %d min verwendet', url, type(exc).__name__,
+                        old[1] // 60)
+            return old[0]
         raise
     finally:
         if own:
             await client.aclose()
+
+
+async def fetch(url: str, *, ttl: float = 3600, client: httpx.AsyncClient | None = None) -> bytes:
+    """GET mit TLS-Prüfung, Zeit- und Größenlimit, Cache (ttl Sekunden); bei Netzfehler alter Cache (→ STALE)."""
+    return await _cached(url, url, ttl, client, 'GET')
 
 
 async def fetch_json(url: str, **kw):
@@ -208,29 +284,6 @@ async def fetch_json(url: str, **kw):
 
 async def post_json(url: str, body: dict, *, ttl: float = 600, client: httpx.AsyncClient | None = None):
     """POST mit JSON-Rumpf (z. B. Flathub-Suche); gleiche Grenzen und derselbe Cache wie `fetch`."""
-    config.ensure_dirs()
     payload = json.dumps(body, sort_keys=True)
-    path = _cache_path(url + '\n' + payload)
-    if path.exists() and time.time() - path.stat().st_mtime < ttl:
-        return json.loads(path.read_bytes())
-    own = client is None
-    client = client or https_client()
-    try:
-        async with client.stream('POST', url, content=payload, headers={'Content-Type': 'application/json'}) as resp:
-            resp.raise_for_status()
-            data = bytearray()
-            async for chunk in resp.aiter_bytes():
-                data += chunk
-                if len(data) > config.MAX_DOWNLOAD:
-                    raise CommandError(_('Antwort zu groß: {url}', url=url))
-        tmp = path.with_suffix('.tmp')
-        tmp.write_bytes(data)
-        tmp.replace(path)
-        return json.loads(bytes(data))
-    except (httpx.HTTPError, CommandError):
-        if path.exists():
-            return json.loads(path.read_bytes())
-        raise
-    finally:
-        if own:
-            await client.aclose()
+    return json.loads(await _cached(url + '\n' + payload, url, ttl, client, 'POST', content=payload,
+                                    headers={'Content-Type': 'application/json'}))

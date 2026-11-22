@@ -582,4 +582,25 @@ MESSAGES: dict[str, str] = {
     'Wartezeit bis zur ersten Prüfung (Standard: {n})': 'wait before the first check (default: {n})',
     'Das Tray-Symbol läuft bereits.': 'The tray icon is already running.',
     'AUR: {n}': 'AUR: {n}',
+    # ------------------------------------------------------------------ hardening 1.5.0
+    '!! Zeitlimit überschritten ({s} s): {cmd}': '!! Time limit exceeded ({s} s): {cmd}',
+    ':: {pkg}: nicht angefordert, wird nicht installiert': ':: {pkg}: not requested, will not be installed',
+    ':: {pkg}: nicht im Build von {base} enthalten': ':: {pkg}: not part of the build of {base}',
+    'Analyse': 'Analysis',
+    'Arch Security Tracker nicht erreichbar – Sicherheitsdaten vom Stand vor {h} h (Cache)':
+        'Arch Security Tracker unreachable – security data is {h} h old (cache)',
+    'Benötigte Programme fehlen: {tools}': 'Required programs missing: {tools}',
+    'Entfernen nicht möglich – Paket nicht installiert? (pacman {rc})': 'Cannot remove – package not installed? (pacman {rc})',
+    'Funktionsgebundene Regeln wurden auf die ganze Datei angewendet.': 'Function-scoped rules were applied to the whole file.',
+    'Höchstens {days} Tage im Voraus planbar': 'Can be scheduled at most {days} days ahead',
+    'Nicht erreichbar, Daten aus dem Cache (evtl. veraltet): {hosts}': 'Unreachable, using cached data (may be outdated): {hosts}',
+    'Nicht in den Paketdatenbanken gefunden: {pkgs}': 'Not found in the package databases: {pkgs}',
+    'PKGBUILD baut {pkg}, das aus den Repos installiert ist – nicht installiert':
+        'PKGBUILD builds {pkg}, which is installed from the repos – not installed',
+    'Struktur nicht eindeutig erkannt': 'Structure not recognised unambiguously',
+    'Zu wenig freier Speicher in {path}: {free} MiB frei, mindestens {need} MiB nötig':
+        'Not enough free space in {path}: {free} MiB free, at least {need} MiB required',
+    'mehrdeutige Paketdateien für {pkg}': 'ambiguous package files for {pkg}',
+    'unerwartete Ausgabe von pacman -T': 'unexpected output from pacman -T',
+    'ungültige Abhängigkeit im PKGBUILD: {dep}': 'invalid dependency in PKGBUILD: {dep}',
 }

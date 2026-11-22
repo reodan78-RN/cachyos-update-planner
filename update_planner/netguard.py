@@ -63,6 +63,12 @@ def peer_uid(client: tuple[str, int] | None, server: tuple[str, int] | None,
     return None
 
 
+_HINT = {
+    'Benutzer unbekannt': ' – das verbindende Socket steht nicht in /proc/net/tcp*; läuft der Client in einem anderen '
+                          'Netzwerk-Namespace (Container, Flatpak-Browser)? Das App-Fenster nutzen.',
+}
+
+
 class LocalOnlyMiddleware:
     """Reine ASGI-Middleware (gilt auch für WebSockets und die eingehängte Socket.IO-App)."""
 
@@ -77,15 +83,18 @@ class LocalOnlyMiddleware:
         if not origin_allowed(headers.get('origin'), host):
             return 'Origin'
         uid = self.lookup(scope.get('client'), scope.get('server'))
-        if uid != self.uid:                       # auch „nicht ermittelbar“ wird abgelehnt (fail closed)
-            return 'Benutzer'
+        if uid is None:                           # nicht ermittelbar wird abgelehnt (fail closed)
+            return 'Benutzer unbekannt'
+        if uid != self.uid:
+            return 'fremder Benutzer'
         return None
 
     async def __call__(self, scope, receive, send):
         if scope['type'] in ('http', 'websocket'):
             why = self.reason(scope)
             if why:
-                log.warning('Zugriff abgelehnt (%s): client=%s', why, scope.get('client'))
+                # nur der Grund – keine Header, Ports oder Socket-Daten ins Protokoll
+                log.warning('Zugriff abgelehnt (%s)%s', why, _HINT.get(why, ''))
                 if scope['type'] == 'websocket':
                     await send({'type': 'websocket.close', 'code': 1008})
                 else:

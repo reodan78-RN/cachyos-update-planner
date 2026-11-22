@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -27,6 +29,15 @@ log = logging.getLogger(__name__)
 
 SNOOZE = 15 * 60            # „Später“: so lange warten
 CHOICES = ('now', '1h', '2h', 'time')
+MAX_AHEAD = 31 * 86400      # weiter in der Zukunft wird nichts geplant (und keine so gespeicherte Datei angenommen)
+CLOCK_SKEW = 300            # Toleranz für `created` in der Zukunft (Uhr verstellt)
+MAX_LIST = 5000             # höchstens so viele Einträge je Liste in der Datei
+# Erlaubte Optionen in der Datei und ihre Typen – genau das, was der Dialog speichert (dialogs.context_dialog)
+OPTS: dict[str, type | tuple[type, ...]] = {
+    'snapshot': bool, 'aur': bool, 'flatpak': bool, 'dry_run': bool, 'sync': bool, 'orphans': bool, 'cache': bool,
+    'hold': (int, float), 'cache_keep': int,
+}
+NAME_RE = r'[a-zA-Z0-9@_+][a-zA-Z0-9@._+/-]*'     # Paketnamen und Flatpak-IDs
 
 
 @dataclass
@@ -65,6 +76,8 @@ def compute_at(choice: str, *, day: date | None = None, clock: dtime | None = No
         at = datetime.combine(day, clock).timestamp()
         if at <= now:
             raise ValueError(_('Der Zeitpunkt liegt in der Vergangenheit'))
+        if at > now + MAX_AHEAD:
+            raise ValueError(_('Höchstens {days} Tage im Voraus planbar', days=MAX_AHEAD // 86400))
         return at
     raise ValueError(f'unknown choice {choice!r}')
 
@@ -88,21 +101,65 @@ def _write(sch: Schedule | None) -> None:
     tmp.replace(path)
 
 
+def _names(value) -> list[str]:
+    if not isinstance(value, list) or len(value) > MAX_LIST:
+        raise ValueError('list')
+    if not all(isinstance(x, str) and len(x) <= 255 and re.fullmatch(NAME_RE, x) for x in value):
+        raise ValueError('name')
+    return list(value)
+
+
+def parse(data, now: float | None = None) -> Schedule:
+    """Gespeicherten Plan streng prüfen; ValueError bei allem, was der Dialog so nicht geschrieben hätte.
+
+    Die Datei ist 0600, aber ein anderer Prozess desselben Benutzers könnte sie ändern. Deshalb: nur bekannte
+    Optionen mit passendem Typ und Wertebereich, endliche Zeitstempel, `created` nicht in der Zukunft und `at`
+    höchstens MAX_AHEAD nach `created` bzw. jetzt. Ausgeführt wird ohnehin nur nach sudo-Passwort im Fenster."""
+    now = time.time() if now is None else now
+    if not isinstance(data, dict):
+        raise ValueError('schedule')
+    at, created = data.get('at'), data.get('created', 0)
+    if isinstance(at, bool) or isinstance(created, bool) or not isinstance(at, int | float) \
+            or not isinstance(created, int | float):
+        raise ValueError('time type')
+    at, created = float(at), float(created)
+    if not (math.isfinite(at) and math.isfinite(created)) or at <= 0 or created < 0:
+        raise ValueError('time value')
+    if created > now + CLOCK_SKEW or at > now + MAX_AHEAD or (created and at > created + MAX_AHEAD):
+        raise ValueError('time range')
+    opts = data.get('opts', {})
+    if not isinstance(opts, dict) or set(opts) - set(OPTS):
+        raise ValueError('opts keys')
+    for k, v in opts.items():
+        if isinstance(v, bool) and OPTS[k] is not bool or not isinstance(v, OPTS[k]):
+            raise ValueError(f'opts {k}')
+    if 'hold' in opts and not 0 <= opts['hold'] <= 100 or 'cache_keep' in opts and not 0 <= opts['cache_keep'] <= 9:
+        raise ValueError('opts range')
+    sources = data.get('sources', [])
+    if not isinstance(sources, list) or not set(sources) <= {'repo', 'aur', 'flatpak'}:
+        raise ValueError('sources')
+    reviewed = data.get('reviewed', {})
+    if not isinstance(reviewed, dict):
+        reviewed = {}                            # alte Liste ohne Hash → verworfen
+    if len(reviewed) > MAX_LIST or not all(isinstance(k, str) and re.fullmatch(NAME_RE, k) and isinstance(v, str)
+                                           and len(v) <= 128 for k, v in reviewed.items()):
+        raise ValueError('reviewed')
+    return Schedule(at=at, opts=dict(opts), deselected=_names(data.get('deselected', [])),
+                    selected_extra=_names(data.get('selected_extra', [])), sources=list(sources),
+                    reviewed=dict(reviewed), created=created)
+
+
 def load() -> Schedule | None:
-    """Gespeicherten Plan lesen (einmal pro Prozess); fehlerhafte Dateien werden ignoriert."""
+    """Gespeicherten Plan lesen (einmal pro Prozess); fehlerhafte oder unplausible Dateien werden ignoriert."""
     global _current, _loaded
     if not _loaded:
         _loaded = True
         try:
-            data = json.loads(_path().read_text())
-            _current = Schedule(at=float(data['at']), opts=dict(data.get('opts', {})),
-                                deselected=[str(x) for x in data.get('deselected', [])],
-                                selected_extra=[str(x) for x in data.get('selected_extra', [])],
-                                sources=[str(x) for x in data.get('sources', [])],
-                                reviewed={str(k): str(v) for k, v in data.get('reviewed', {}).items()}
-                                if isinstance(data.get('reviewed'), dict) else {},   # alte Liste ohne Hash → verworfen
-                                created=float(data.get('created', 0)))
-        except (OSError, ValueError, KeyError, TypeError):
+            _current = parse(json.loads(_path().read_text()))
+        except FileNotFoundError:
+            _current = None
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            log.warning('Geplantes Update verworfen (Datei ungültig: %s)', exc)
             _current = None
     return _current
 

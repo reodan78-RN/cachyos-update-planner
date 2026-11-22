@@ -60,21 +60,50 @@ commands as root. This document describes how that is contained.
 
 ## AUR builds
 
-- **Manual review is bound to the content.** *Mark as reviewed* in the AUR scanner stores the package name together
-  with a SHA-256 over the reviewed `PKGBUILD` (and `.install`). The approval only counts while the files are
-  identical: before building, the executor hashes the cloned files again, and if the hash differs (new version,
-  maintainer takeover, tampering) it logs that the approval no longer applies and asks again whenever the score is
-  40 or more. The same check decides whether the update dialog still lists a package as flagged. Plans saved by
-  version 1.3.2 and earlier contain names without hashes; such approvals are discarded.
+- **Manual review is bound to the content.** *Mark as reviewed* in the AUR scanner stores a SHA-256 over the
+  package name and every reviewed file as a *(file name, content)* pair: the `PKGBUILD` and each `.install` file it
+  references via `install=` (`$pkgname`/`$pkgbase` resolved, also inside `package_*()`). An approval covers exactly
+  these files with exactly this content – a changed byte, a renamed, added or removed file, or another package name
+  gives a different hash. Before building, the executor hashes the cloned files again (plus, conservatively, any other
+  `*.install` file in the repository); if the hash differs (new version, maintainer takeover, tampering) it logs that
+  the approval no longer applies and asks again whenever the score is 40 or more. The same check decides whether the
+  update dialog still lists a package as flagged. Approvals from 1.4.x and earlier (content-only hash) and plans saved
+  by 1.3.2 and earlier (names only) no longer match and are asked for again.
 
 - The AUR scanner runs during loading and **again on the exact PKGBUILD that is about to be built**, right after
   cloning. A score of 40 or more asks for confirmation before building.
-- AUR dependencies that are not in the official repos are not built automatically.
+- AUR dependencies that are not in the official repos are not built automatically. Dependencies from
+  `.SRCINFO` must look like `name` or `name<op>version`; anything else (e.g. a value starting with `-` that pacman
+  would read as an option) stops the package, and all package lists follow a `--`.
+- **Only planned packages are installed.** Of the built package files, only those named in the plan for this
+  `pkgbase` are passed to `pacman -U` (a new install: only the requested package; an update: only packages that are
+  installed). A build that produces a package already installed from the repos, or two files for one name, is
+  stopped; other extra artefacts (e.g. `-debug`) are logged and left alone. Split packages are built once per base.
+- `git clone`/`fetch` have a 10-minute limit; every child process is terminated (SIGTERM, then SIGKILL after 5 s)
+  and reaped on timeout, error or cancellation – also the `sudo -v` password check.
 - Build directories live in `~/.cache/update-planner/aur` with mode `0700`.
 
 The scanner is a heuristic. It finds common malware patterns (download-and-execute, base64-encoded payloads,
 reverse shells, persistence, SUID bits, raw IP or paste-site sources, disabled checksums, maintainer takeovers),
 but it cannot prove a package safe.
+
+Some rules only apply in a context (network access in `prepare`/`build`/`package`, in install scriptlets). The
+scanner tracks functions line by line and ignores braces inside quotes, `${…}` expansions, comments and here-docs.
+It errs on the side of reporting: split functions `package_*()` count as `package`, top-level commands (which run as
+soon as makepkg reads the PKGBUILD, including `$(…)` in assignments) count like build code, every line of an
+`.install` file counts as install code, and if the structure cannot be recognised with certainty (unbalanced braces,
+an unterminated string, a function body that is not `{ … }`) the context rules apply to the whole file and an
+informational finding *Structure not recognised unambiguously* is shown.
+
+## Before anything changes (preflight)
+
+Before the snapshot and before any `sudo` command, the run checks everything that can be checked without
+changing the system, and aborts without having touched anything otherwise: the pacman database lock, all package
+names and Flatpak IDs, the required programs (`pacman`, `sudo`, `git`, `makepkg`, `paccache`, `flatpak` as
+needed), free space (2 GiB on `/` and in `/var/cache/pacman/pkg` for repo/AUR runs, 1 GiB for AUR builds), that
+packages to install exist in the sync databases, and that a removal would not break dependencies. A failing snapshot
+also stops the run before pacman starts. This does not make the run a transaction – a download can still fail
+halfway, and repo, AUR and Flatpak are separate steps – the snapshot is the way back.
 
 ## Network
 
@@ -85,9 +114,14 @@ but it cannot prove a package safe.
   Flathub; regex characters of the term are escaped and the words follow a `--`, so a term such as `--version`
   is searched for and never read as a pacman option.
 - Flatpak IDs must start with a letter, digit or underscore (never `-`) before they are passed to `flatpak`.
-- All HTTP clients come from `sysutil.https_client()`: TLS verification, at most 3 redirects, and a redirect to
-  `http://` is refused.
-- Every download has a timeout and a size limit (8 MiB); responses are cached in `~/.cache/update-planner/http`.
+- All HTTP clients come from `sysutil.https_client()`: TLS verification, at most 3 redirects, and **every request –
+  including each redirect – must be HTTPS to one of the hosts above** (`config.TRUSTED_DOMAINS`, with subdomains);
+  anything else is refused before a connection is made.
+- Every download has a timeout and a size limit (8 MiB); responses are cached in `~/.cache/update-planner/http`
+  (directory `0700`, files `0600` written atomically via a unique temp file). Cache reads do not follow symlinks and
+  only accept your own regular files up to 8 MiB.
+- If a source is unreachable, the last cached copy is used **and reported**: the overview shows a warning with the
+  age of the security data, or the hosts whose data came from the cache, instead of presenting it as current.
 - Links from news feeds are only shown when they use `https://` (no `javascript:` links).
 - RSS feeds that contain a DTD or entity declarations are rejected (protection against entity expansion).
 - Advisory IDs from the tracker are validated before they become part of a link.
@@ -99,7 +133,13 @@ but it cannot prove a package safe.
   `localhost` or `[::1]` (DNS rebinding), an `Origin` header must equal the `Host` (a web page in your browser
   cannot open a connection to the planner – NiceGUI itself would accept any origin), and the connecting socket must
   belong to a process of **your own user** (read from `/proc/net/tcp*`; unknown peers are refused). Other users on
-  the machine therefore cannot use the interface; installing still needs your sudo password.
+  the machine therefore cannot use the interface; installing still needs your sudo password. Refusals are logged
+  with the reason only (no headers or socket data); "user unknown" points at a client in another network namespace
+  (container, sandboxed browser) – use the app window.
+- A scheduled plan (`~/.config/update-planner/schedule.json`, `0600`) is checked strictly when read: only the
+  options the dialog writes, with matching types and ranges, valid package names, finite times, and at most 31 days
+  ahead. Anything else is discarded, not acted on. It cannot be protected against other processes of your own user
+  (nothing can), but a due plan only ever opens the password dialog – it never runs without your sudo password.
 - The session secret is random per installation (`~/.config/update-planner/secret`, mode `0600`).
 - HTML is only rendered for content the planner builds itself; PKGBUILD content is escaped before display.
 

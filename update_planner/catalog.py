@@ -11,8 +11,9 @@ import logging
 import re
 import time
 from datetime import datetime
+from urllib.parse import urlsplit
 
-from . import analysis, aur_scanner
+from . import analysis, aur_scanner, sysutil
 from .i18n import _
 from .sources import aur, discover, flatpak, news, pacman, security, system
 
@@ -183,6 +184,7 @@ def _warn(text: str) -> None:
 
 async def _collect() -> dict:
     _step(_('Installierte Pakete lesen …'))
+    sysutil.STALE.clear()
     inst = await asyncio.to_thread(pacman.installed)
     sysinfo = await asyncio.to_thread(system.info)
     # pacman.log kann viele MB groß sein – nicht im Event-Loop lesen
@@ -235,6 +237,9 @@ async def _collect() -> dict:
     except Exception as exc:  # noqa: BLE001
         _warn(_('Arch Security Tracker nicht erreichbar: {err}', err=exc))
         cves = []
+    if security.URL in sysutil.STALE:
+        _warn(_('Arch Security Tracker nicht erreichbar – Sicherheitsdaten vom Stand vor {h} h (Cache)',
+                h=round(sysutil.STALE[security.URL] / 3600, 1)))
     if cves:
         try:
             await security.describe(cves)
@@ -259,6 +264,9 @@ async def _collect() -> dict:
             scans = aur_scanner.scan_all(aur_meta)
         except Exception as exc:  # noqa: BLE001
             _warn(_('AUR-Scan unvollständig: {err}', err=exc))
+    other = {urlsplit(u).hostname or u for u in sysutil.STALE if u != security.URL}
+    if other:
+        _warn(_('Nicht erreichbar, Daten aus dem Cache (evtl. veraltet): {hosts}', hosts=', '.join(sorted(other))))
 
     _step(_('Bewerten …'))
     data = await asyncio.to_thread(_assemble, inst, repo_updates, fp_items, fp_updates, aur_updates, aur_missing,

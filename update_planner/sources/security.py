@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 
 import httpx
 
-from ..sysutil import fetch_json, https_client, vercmp
+from ..sysutil import CommandError, fetch_json, https_client, vercmp
 
 log = logging.getLogger(__name__)
 
@@ -19,7 +20,10 @@ CVE_RE = re.compile(r'CVE-\d{4}-\d{4,}')
 
 
 async def advisories(ttl: float = 6 * 3600) -> list[dict]:
-    return await fetch_json(URL, ttl=ttl)
+    data = await fetch_json(URL, ttl=ttl)
+    if not isinstance(data, list):
+        raise CommandError(f'unerwartetes Format von {URL}: {type(data).__name__}')
+    return [g for g in data if isinstance(g, dict)]
 
 
 def relevant(groups: list[dict], installed: dict[str, str], updates: dict[str, str]) -> list[dict]:
@@ -90,9 +94,13 @@ async def describe(items: list[dict], ttl: float = 7 * 86400, per_group: int = 2
                             return
                         retry = exc.response.headers.get('Retry-After', '')
                         await asyncio.sleep(min(float(retry) if retry.isdigit() else 1.5 * (attempt + 1), 10))
-                    except Exception as exc:  # noqa: BLE001 – einzelne CVEs dürfen fehlen
-                        log.info('CVE %s nicht abrufbar: %s', cve, exc)
+                    except (httpx.HTTPError, CommandError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+                        log.info('CVE %s nicht abrufbar: %s', cve, exc)   # Netz/Format: einzelne CVEs dürfen fehlen
                         return
+                    except Exception:
+                        # Programmierfehler o. Ä. nicht als „fehlende Beschreibung“ tarnen: protokollieren, weiterreichen
+                        log.exception('Unerwarteter Fehler beim Abruf von CVE %s', cve)
+                        raise
                     finally:
                         await asyncio.sleep(0.15)
 
