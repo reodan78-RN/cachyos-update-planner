@@ -192,18 +192,18 @@ def run_tray(interval: int, first_delay: int) -> int:
 
             self.tray = QSystemTrayIcon(QIcon(self.base), app)
             menu = QMenu()
-            self.status = QAction(_('Prüfe auf Updates …'))
+            self.status = QAction(_('Prüfe auf Updates …'), menu)
             self.status.setEnabled(False)
             menu.addAction(self.status)
             menu.addSeparator()
-            open_act = QAction(_('Update Planner öffnen'))
+            open_act = QAction(_('Update Planner öffnen'), menu)   # Parent = Menü, sonst räumt Python die Action ab
             open_act.triggered.connect(self.open_planner)
             menu.addAction(open_act)
-            self.check_act = QAction(_('Jetzt prüfen'))
+            self.check_act = QAction(_('Jetzt prüfen'), menu)
             self.check_act.triggered.connect(lambda: self.start_check(manual=True))
             menu.addAction(self.check_act)
             menu.addSeparator()
-            quit_act = QAction(_('Beenden'))
+            quit_act = QAction(_('Beenden'), menu)
             quit_act.triggered.connect(app.quit)
             menu.addAction(quit_act)
             self.menu = menu                      # Referenz halten, sonst räumt Python das Menü ab
