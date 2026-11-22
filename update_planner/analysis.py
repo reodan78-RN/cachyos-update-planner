@@ -7,7 +7,7 @@ from collections import defaultdict
 
 from . import config
 from .i18n import _
-from .sysutil import version_parts, vercmp
+from .sysutil import vercmp, version_parts
 
 DEP_RE = re.compile(r'^([^<>=]+)(?:(<=|>=|=|<|>)(.+))?$')
 

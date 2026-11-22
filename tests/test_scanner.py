@@ -1,4 +1,5 @@
-from update_planner import aur_samples, aur_scanner as sc
+from update_planner import aur_samples
+from update_planner import aur_scanner as sc
 
 
 def ids(findings):

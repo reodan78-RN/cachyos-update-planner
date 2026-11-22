@@ -4,10 +4,10 @@ from nicegui import ui
 
 from .. import catalog as md
 from .. import state as st
-from ..i18n import _
 from .. import theme
-from ..theme import card
 from ..dialogs import is_protected, start_remove
+from ..i18n import _
+from ..theme import card
 from .overview import dashboard_header, loading_card
 
 MAX_NODES = 60

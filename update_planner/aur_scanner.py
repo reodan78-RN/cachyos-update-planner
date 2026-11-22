@@ -14,7 +14,6 @@ from datetime import date
 
 from .i18n import _
 
-
 SEVERITY_POINTS = {'kritisch': 45, 'hoch': 25, 'mittel': 12, 'niedrig': 4, 'info': 0}
 SEVERITY_ORDER = ['kritisch', 'hoch', 'mittel', 'niedrig', 'info']
 SEVERITY_COLOR = {'kritisch': 'purple', 'hoch': 'negative', 'mittel': 'warning', 'niedrig': 'info', 'info': 'grey'}

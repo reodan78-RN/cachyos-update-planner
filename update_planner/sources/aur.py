@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote
 
@@ -46,7 +46,7 @@ async def info(names: list[str], ttl: float = 900) -> dict[str, dict]:
 
 def _date(ts) -> str | None:
     try:
-        return datetime.fromtimestamp(int(ts), timezone.utc).date().isoformat() if ts else None
+        return datetime.fromtimestamp(int(ts), UTC).date().isoformat() if ts else None
     except (TypeError, ValueError, OverflowError, OSError):
         return None
 

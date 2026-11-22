@@ -16,10 +16,18 @@ import re
 import time
 from urllib.parse import quote
 
-
 from .. import config
 from ..i18n import _, thousands
-from ..sysutil import fetch, fetch_json, have, https_client, post_json, run, valid_flatpak, valid_name
+from ..sysutil import (
+    fetch,
+    fetch_json,
+    have,
+    https_client,
+    post_json,
+    run,
+    valid_flatpak,
+    valid_name,
+)
 from . import flatpak, pacman, security
 
 log = logging.getLogger(__name__)
