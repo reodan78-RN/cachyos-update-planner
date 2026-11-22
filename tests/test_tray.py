@@ -68,3 +68,36 @@ def test_aur_updates(monkeypatch):
 def test_summary_counts_aur():
     title, text = tray.summary({'repo': [('a', '1')], 'aur': [('b', '2')], 'flatpak': []})
     assert title == '2 Updates verfügbar' and 'AUR: 1' in text
+
+
+def test_menu_keeps_all_actions(monkeypatch):
+    """Regression: QActions ohne Parent wurden abgeräumt – 'Öffnen' und 'Beenden' fehlten im Menü."""
+    import gc
+
+    import pytest
+    pytest.importorskip('PySide6')
+    monkeypatch.setenv('QT_QPA_PLATFORM', 'offscreen')
+    from PySide6.QtWidgets import QApplication, QSystemTrayIcon
+
+    captured = {}
+    orig_set = QSystemTrayIcon.setContextMenu
+
+    def grab(self, menu):
+        captured['menu'] = menu
+        return orig_set(self, menu)
+
+    def fake_exec():
+        gc.collect()                                      # hätte die parentlosen Actions entfernt
+        captured['texts'] = [a.text() for a in captured['menu'].actions() if not a.isSeparator()]
+        captured['quit'] = next(a for a in captured['menu'].actions() if a.text() == tray._('Beenden'))
+        return 0
+
+    monkeypatch.setattr(QSystemTrayIcon, 'setContextMenu', grab)
+    monkeypatch.setattr(QApplication, 'exec', staticmethod(fake_exec))
+    monkeypatch.setattr(tray, 'load_notified', lambda: set())
+    assert tray.run_tray(60, 3600) == 0
+    texts = captured['texts']
+    assert len(texts) == 4
+    assert tray._('Update Planner öffnen') in texts
+    assert tray._('Jetzt prüfen') in texts
+    assert tray._('Beenden') in texts
