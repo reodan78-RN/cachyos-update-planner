@@ -5,10 +5,10 @@ from nicegui import ui
 from .. import aur_scanner as sc
 from .. import catalog as md
 from .. import state as st
+from .. import theme
 from ..i18n import _
 from ..sources import aur as aur_src
 from ..sysutil import NAME_RE
-from .. import theme
 from ..theme import card
 from .overview import dashboard_header
 
@@ -195,7 +195,7 @@ def page() -> None:
                             theme.badge(str(r.score), theme.threshold(r.score, 15, 70))
                             with ui.column().classes('gap-0 flex-1 min-w-0'):
                                 ui.label(r.package).classes('font-semibold truncate')
-                                ui.label((f'{upd["old"]} → {upd["new"]}' if upd else (_('nur geprüft – nicht installiert') if md.AUR_META.get(r.package, {}).get('lookup') else _('kein Update')))).classes('muted text-xs')
+                                ui.label(f'{upd["old"]} → {upd["new"]}' if upd else (_('nur geprüft – nicht installiert') if md.AUR_META.get(r.package, {}).get('lookup') else _('kein Update'))).classes('muted text-xs')
                                 with ui.row().classes('gap-1 mt-1 items-center'):
                                     ui.icon(icon, color=color, size='16px')
                                     ui.label(_(verdict)).classes('text-xs')

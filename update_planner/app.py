@@ -133,7 +133,7 @@ def root() -> None:
         try:
             with client.layout:               # Hintergrund-Task braucht einen UI-Kontext für Dialoge und Meldungen
                 await run_scheduled(s)
-        except Exception:  # noqa: BLE001 – nicht bei jedem Poll erneut fehlschlagen
+        except Exception:  # nicht bei jedem Poll erneut fehlschlagen
             if client.id in Client.instances:     # Fenster weg (Reload/Schließen): Plan bleibt fällig für das nächste
                 log.exception('Geplantes Update konnte nicht gestartet werden')
                 scheduler.snooze()

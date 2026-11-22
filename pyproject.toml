@@ -24,10 +24,51 @@ include = ["update_planner*"]
 update_planner = ["static/*.png"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio>=0.23", "pillow>=10"]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5",
+    "pillow>=10",
+    "ruff==0.17.5",     # gepinnt: Ruffs Standard-Regelsatz ändert sich zwischen Versionen
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
 [tool.setuptools.dynamic]
 version = {attr = "update_planner.__version__"}
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+# Regeln anderer Werkzeuge (Bandit u. a.), deren noqa-Kommentare bewusst stehen bleiben
+external = ["S105", "S314", "E402", "E731"]
+ignore = [
+    "C408",     # dict(...)-Aufrufe sind hier gewollter Stil
+    "SIM117",   # verschachtelte NiceGUI-`with`-Blöcke spiegeln den UI-Baum
+    "SIM115",   # Dateien, die bewusst länger offen bleiben (Lock, Tests)
+    "PLW1510",  # subprocess.run: Rückgabecode wird selbst geprüft
+    "TRY004",   # ValueError für ungültige Konfigurationswerte
+    "FURB167",  # re.I / re.M sind lesbar genug
+    "FURB192",
+    "PIE807",   # `lambda: []` als Test-Stub wie die übrigen Stubs
+]
+
+# Coverage-Gate für die sicherheitskritischen Module (nur mit `pytest --cov`;
+# ohne pytest-cov laufen die Tests unverändert).
+[tool.coverage.run]
+source = ["update_planner"]
+
+[tool.coverage.report]
+include = [
+    "update_planner/aur_scanner.py",
+    "update_planner/executor.py",
+    "update_planner/sysutil.py",
+    "update_planner/netguard.py",
+    "update_planner/scheduler.py",
+    "update_planner/sources/security.py",
+]
+fail_under = 88   # gemessen 2026-11-22: 90,1 %
+show_missing = true
+skip_covered = false

@@ -166,7 +166,7 @@ async def refresh() -> None:
             try:
                 _publish(await _collect())
                 STATUS.update(state='ready', step='', loaded_at=time.time())
-            except Exception as exc:  # noqa: BLE001 – Fehler sichtbar machen statt die App zu beenden
+            except Exception as exc:  # Fehler sichtbar machen statt die App zu beenden
                 log.exception('Systemstand konnte nicht geladen werden')
                 STATUS.update(state='error', step=str(exc)[:300])
             if not _pending:
