@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.1 – 2026-11-22
+
+- **Tray icon:** the count now matches the planner – AUR updates are included, and the tray re-checks when the
+  planner synchronised its database, when the planner window is closed and when the tray menu is opened with
+  data older than 5 minutes (before, it could show an hour-old number).
+
 ## 1.4.0 – 2026-11-22
 
 - **Tray icon:** new program `update-planner-tray` (lightweight Qt StatusNotifier, no web view). It starts on login,

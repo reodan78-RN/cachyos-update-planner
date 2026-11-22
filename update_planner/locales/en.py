@@ -581,4 +581,5 @@ MESSAGES: dict[str, str] = {
     'SEKUNDEN': 'SECONDS',
     'Wartezeit bis zur ersten Prüfung (Standard: {n})': 'wait before the first check (default: {n})',
     'Das Tray-Symbol läuft bereits.': 'The tray icon is already running.',
+    'AUR: {n}': 'AUR: {n}',
 }

@@ -4,7 +4,7 @@ from update_planner import tray
 
 
 def test_signature_and_news():
-    found = {'repo': [('linux', '7.0-1'), ('git', '2.1-1')], 'flatpak': [('org.x.App', '1.2')]}
+    found = {'repo': [('linux', '7.0-1'), ('git', '2.1-1')], 'aur': [], 'flatpak': [('org.x.App', '1.2')]}
     sig = tray.signature(found)
     assert sig == {'repo:linux=7.0-1', 'repo:git=2.1-1', 'flatpak:org.x.App=1.2'}
     assert tray.total(found) == 3
@@ -54,3 +54,17 @@ def test_single_instance(tmp_path, monkeypatch):
     assert tray.lock_instance(path) is None
     first.close()
     assert tray.lock_instance(path) is not None
+
+
+def test_aur_updates(monkeypatch):
+    monkeypatch.setattr(tray, 'run', lambda *a, **k: 'foo 1.0-1\nbar-git r5-1\n')
+
+    async def fake_info(names, ttl=0):
+        return {'foo': {'Name': 'foo', 'Version': '1.1-1'}, 'bar-git': {'Name': 'bar-git', 'Version': 'r9-1'}}
+    monkeypatch.setattr(tray.aur, 'info', fake_info)
+    assert tray.aur_updates() == [('foo', '1.1-1')]            # VCS-Paket wird nicht verglichen
+
+
+def test_summary_counts_aur():
+    title, text = tray.summary({'repo': [('a', '1')], 'aur': [('b', '2')], 'flatpak': []})
+    assert title == '2 Updates verfügbar' and 'AUR: 1' in text

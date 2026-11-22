@@ -7,6 +7,7 @@ Merken bereits gemeldeter Updates) ist von der Qt-Oberfläche getrennt und ohne 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import fcntl
 import json
 import logging
@@ -15,10 +16,12 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from . import __version__, config, i18n
 from .i18n import _
+from .sources import aur
 from .sysutil import CommandError, env_c, have, run
 
 log = logging.getLogger('update_planner.tray')
@@ -63,9 +66,24 @@ def flatpak_updates() -> list[tuple[str, str]]:
     return found
 
 
+def aur_updates() -> list[tuple[str, str]]:
+    """Fremdpakete (`pacman -Qm`) mit neuerer Version im AUR (wie im Planer; VCS-Pakete ausgenommen)."""
+    try:
+        out = run(['pacman', '-Qm'], timeout=30, ok_codes=(0, 1))
+        foreign = dict(line.split(None, 1) for line in out.splitlines() if len(line.split(None, 1)) == 2)
+        if not foreign:
+            return []
+        found, _missing = aur.updates(foreign, asyncio.run(aur.info(list(foreign), ttl=600)))
+    except Exception as exc:  # noqa: BLE001 – AUR nicht erreichbar: Repo/Flatpak trotzdem melden
+        log.warning('AUR-Prüfung fehlgeschlagen: %s', exc)
+        return []
+    return [(u['name'], u['new']) for u in found]
+
+
 def check() -> dict[str, list[tuple[str, str]]]:
-    """Fragt Repo und Flatpak ab. Fällt `checkupdates` aus, wird die Ausnahme weitergereicht (Stand beibehalten)."""
-    return {'repo': repo_updates(), 'flatpak': flatpak_updates()}
+    """Fragt Repo, AUR und Flatpak ab – dieselben Quellen wie der Planer. Fällt `checkupdates` aus, wird die
+    Ausnahme weitergereicht (Stand beibehalten)."""
+    return {'repo': repo_updates(), 'aur': aur_updates(), 'flatpak': flatpak_updates()}
 
 
 def signature(found: dict[str, list[tuple[str, str]]]) -> set[str]:
@@ -86,6 +104,8 @@ def summary(found: dict[str, list[tuple[str, str]]], limit: int = 5) -> tuple[st
     parts = []
     if found.get('repo'):
         parts.append(_('Repo: {n}', n=len(found['repo'])))
+    if found.get('aur'):
+        parts.append(_('AUR: {n}', n=len(found['aur'])))
     if found.get('flatpak'):
         parts.append(_('Flatpak: {n}', n=len(found['flatpak'])))
     names = [name for items in found.values() for name, _v in items]
@@ -204,6 +224,17 @@ def run_tray(interval: int, first_delay: int) -> int:
             self.debounce.timeout.connect(self.start_check)
             self.watcher = QFileSystemWatcher([str(PACMAN_LOG)] if PACMAN_LOG.exists() else [], self)
             self.watcher.fileChanged.connect(self.on_log_changed)
+            # Hat der Planer seine Datenbank neu synchronisiert, ist er aktueller als wir → neu zählen
+            sync = config.CHECKUP_DB / 'sync'
+            if sync.is_dir():
+                self.watcher.addPath(str(sync))
+                self.watcher.directoryChanged.connect(lambda _p: self.debounce.start(20_000))
+            self.menu.aboutToShow.connect(self.refresh_if_stale)
+            self.last_check = 0.0
+
+        def refresh_if_stale(self) -> None:
+            if time.monotonic() - self.last_check > 300:    # Menü geöffnet und Stand älter als 5 Minuten
+                self.start_check()
 
         def on_log_changed(self, path: str) -> None:
             if path not in self.watcher.files() and Path(path).exists():
@@ -219,9 +250,17 @@ def run_tray(interval: int, first_delay: int) -> int:
                 return                             # läuft schon (Fokus setzen kann die App unter Wayland nicht)
             try:
                 self.child = subprocess.Popen(planner_command(), stdin=subprocess.DEVNULL, start_new_session=True)
+                QTimer.singleShot(5000, self.watch_child)
             except OSError as exc:
                 self.tray.showMessage('CachyOS Update Planner', _('Start fehlgeschlagen: {err}', err=exc),
                                       QSystemTrayIcon.MessageIcon.Warning, 8000)
+
+        def watch_child(self) -> None:
+            if self.child and self.child.poll() is not None:
+                self.child = None
+                self.start_check()                  # Fenster wurde geschlossen (evtl. nach einem Update)
+            elif self.child:
+                QTimer.singleShot(5000, self.watch_child)
 
         def start_check(self, manual: bool = False) -> None:
             if self.worker and self.worker.isRunning():
@@ -243,6 +282,7 @@ def run_tray(interval: int, first_delay: int) -> int:
 
         def on_result(self, found: dict, manual: bool) -> None:
             self.found = found
+            self.last_check = time.monotonic()
             n = total(found)
             title, text = summary(found)
             self.status.setText(title)
