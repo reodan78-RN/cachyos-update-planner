@@ -43,6 +43,8 @@ all three sources (sorted by popularity, with security hints) and **schedule** a
   sudo password is requested. Updates that appeared in the meantime are included, deselected ones stay out
 - **Hardened local server** – the web interface listens on `127.0.0.1` only and refuses foreign `Host`/`Origin`
   headers and connections from other users; all downloads are HTTPS-only (see [Security](docs/security.md))
+- **Tray icon** – `update-planner-tray` starts on login (`install-desktop.sh --autostart`), shows the number of
+  pending repo/Flatpak updates as a badge, announces new ones in a popup and opens the planner on click (needs `pyside6`)
 - **Desktop app** – own window (NiceGUI + GTK/WebKit), light and dark theme, KDE menu entry and icon
 - **Language** – follows the system language (German or English; other languages fall back to English)
 
@@ -79,6 +81,8 @@ update-planner [--browser] [--port N] [--demo] [--lang de|en] [-v] [--version]
 | `--demo` | show built-in demo data instead of the real system (includes a malicious AUR example) |
 | `--lang de\|en` | force a language; default is the system language |
 | `-v` | verbose logging |
+
+`update-planner-tray [--interval MINUTES] [--delay SECONDS]` runs the tray icon (see the [user guide](docs/user-guide.md)).
 
 ## Development
 

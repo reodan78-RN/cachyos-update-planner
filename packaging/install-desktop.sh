@@ -2,7 +2,7 @@
 # Installs the CachyOS Update Planner as a KDE mini program for the current user (no root needed).
 #
 #   packaging/install-desktop.sh                     install / update
-#   packaging/install-desktop.sh --autostart         also start on login
+#   packaging/install-desktop.sh --autostart         also start the tray icon on login
 #   packaging/install-desktop.sh --remove            remove everything again
 set -euo pipefail
 
@@ -38,7 +38,7 @@ remove_icons() {
 if (( remove )); then
     bash "$SRC/packaging/kde-integration.sh" remove || true
     rm -rf "$APPDIR"
-    rm -f "$BIN/update-planner" "$APPS/update-planner.desktop"
+    rm -f "$BIN/update-planner" "$BIN/update-planner-tray" "$APPS/update-planner.desktop" "$APPS/update-planner-tray.desktop"
     remove_icons
     gtk-update-icon-cache -q -f -t "$HICOLOR" 2>/dev/null || true
     update-desktop-database "$APPS" 2>/dev/null || true
@@ -49,7 +49,7 @@ fi
 
 # ---- System requirements (only checked – nothing is installed without your consent)
 required=(pacman-contrib expac git python-gobject webkit2gtk-4.1)
-optional=(base-devel flatpak snapper ttf-fira-sans)
+optional=(base-devel flatpak snapper ttf-fira-sans pyside6)
 missing=()
 for p in "${required[@]}"; do pacman -Q "$p" >/dev/null 2>&1 || missing+=("$p"); done
 if (( ${#missing[@]} )); then
@@ -58,7 +58,7 @@ if (( ${#missing[@]} )); then
     exit 1
 fi
 for p in "${optional[@]}"; do
-    pacman -Q "$p" >/dev/null 2>&1 || msg "Hinweis: optional fehlt $p (AUR-Builds/Flatpak/Snapshots eingeschränkt)" "Note: optional $p missing (AUR builds/Flatpak/snapshots limited)"
+    pacman -Q "$p" >/dev/null 2>&1 || msg "Hinweis: optional fehlt $p (AUR-Builds/Flatpak/Snapshots/Tray-Symbol eingeschränkt)" "Note: optional $p missing (AUR builds/Flatpak/snapshots/tray icon limited)"
 done
 
 echo "→ venv: $VENV"
@@ -68,12 +68,14 @@ python3 -m venv --system-site-packages "$VENV"
 
 mkdir -p "$APPS" "$BIN"
 ln -sf "$VENV/bin/update-planner" "$BIN/update-planner"
+ln -sf "$VENV/bin/update-planner-tray" "$BIN/update-planner-tray"
 remove_icons
 for s in "${SIZES[@]}"; do
     install -Dm644 "$SRC/packaging/icons/update-planner-$s.png" "$HICOLOR/${s}x${s}/apps/update-planner.png"
 done
 # File name must equal the Wayland app ID "update-planner", otherwise KDE cannot match the window
 sed "s|@EXEC@|$VENV/bin/update-planner|" "$SRC/packaging/update-planner.desktop" > "$APPS/update-planner.desktop"
+sed "s|@EXEC@|$VENV/bin/update-planner-tray|" "$SRC/packaging/update-planner-tray.desktop" > "$APPS/update-planner-tray.desktop"
 update-desktop-database "$APPS" 2>/dev/null || true
 gtk-update-icon-cache -q -f -t "$HICOLOR" 2>/dev/null || true
 command -v kbuildsycoca6 >/dev/null && kbuildsycoca6 >/dev/null 2>&1 || true

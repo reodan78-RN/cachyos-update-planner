@@ -34,6 +34,12 @@ commands as root. This document describes how that is contained.
 - No command is run through a shell. Package names and Flatpak IDs are validated against strict patterns before
   they are passed to any command.
 
+## Tray icon
+
+- The tray process only reads: `checkupdates` against its own private database (`~/.cache/update-planner/tray-db`)
+  and `flatpak remote-ls --updates`. It never uses `sudo` and has no network server; the planner window is started
+  as a separate process on click. State: `~/.cache/update-planner/tray.json` (mode `0600`, names and versions only).
+
 ## Scheduled updates
 
 - A schedule stores the time, the dialog options, the *deselected* and the deliberately added updates, the source

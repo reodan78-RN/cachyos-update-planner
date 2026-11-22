@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=CachyOS Update Planner (Tray)
+GenericName=Update-Hinweise im Systemabschnitt
+Comment=Zeigt anstehende Updates im Systemabschnitt und meldet neue per Popup
+Exec=@EXEC@
+Icon=update-planner
+Terminal=false
+Categories=System;PackageManager;
+Keywords=update;pacman;tray;
+StartupNotify=false

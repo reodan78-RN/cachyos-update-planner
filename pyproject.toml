@@ -11,6 +11,7 @@ dependencies = [
 
 [project.scripts]
 update-planner = "update_planner.app:main"
+update-planner-tray = "update_planner.tray:main"
 
 [build-system]
 requires = ["setuptools>=68"]

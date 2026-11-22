@@ -2,15 +2,16 @@
 # KDE Plasma integration for the Update Planner.
 # The window opens like any other program on the current virtual desktop – no window rule is installed.
 #
-#   kde-integration.sh install [--autostart]   set up autostart on login (optional)
+#   kde-integration.sh install [--autostart]   start the tray icon on login (optional)
 #   kde-integration.sh remove                  remove autostart, clean up rules of older versions
 set -euo pipefail
 
 APP_ID="update-planner"
 LEGACY_RULE="6f1c3d27-0a4f-4b9a-8e21-7570706c616e"   # window rule installed by version 1.0.0
 CFG="${XDG_CONFIG_HOME:-$HOME/.config}"
-AUTOSTART="$CFG/autostart/$APP_ID.desktop"
-APPS="${XDG_DATA_HOME:-$HOME/.local/share}/applications/$APP_ID.desktop"
+AUTOSTART="$CFG/autostart/$APP_ID-tray.desktop"
+OLD_AUTOSTART="$CFG/autostart/$APP_ID.desktop"      # up to 1.3: the window itself started on login
+APPS="${XDG_DATA_HOME:-$HOME/.local/share}/applications/$APP_ID-tray.desktop"
 
 # Messages follow the system language (German or English)
 msg() { local l="${LANGUAGE:-${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}}"; [[ "$l" == de* ]] && echo "$1" || echo "$2"; }
@@ -48,14 +49,15 @@ install() {
         [[ -f "$APPS" ]] || { msg "Zuerst install-desktop.sh ausführen (Starter fehlt)" "Run install-desktop.sh first (launcher missing)"; exit 1; }
         mkdir -p "$(dirname "$AUTOSTART")"
         { cat "$APPS"; echo "X-KDE-autostart-after=panel"; } > "$AUTOSTART"
-        msg "→ Autostart eingerichtet ($AUTOSTART)" "→ Autostart enabled ($AUTOSTART)"
+        rm -f "$OLD_AUTOSTART"
+        msg "→ Autostart des Tray-Symbols eingerichtet ($AUTOSTART)" "→ Tray icon autostart enabled ($AUTOSTART)"
     fi
 }
 
 remove() {
     remove_legacy_rule
-    if [[ -f "$AUTOSTART" ]]; then
-        rm -f "$AUTOSTART"
+    if [[ -f "$AUTOSTART" || -f "$OLD_AUTOSTART" ]]; then
+        rm -f "$AUTOSTART" "$OLD_AUTOSTART"
         msg "→ Autostart entfernt" "→ Autostart removed"
     fi
 }

@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.4.0 – 2026-11-22
+
+- **Tray icon:** new program `update-planner-tray` (lightweight Qt StatusNotifier, no web view). It starts on login,
+  checks for repo and Flatpak updates (first check 30 s after start, then hourly, and right after `pacman.log`
+  changes), shows the number as a red badge on the icon and in the tooltip, and pops up a notification when
+  *new* updates appeared (already announced updates are remembered in `~/.cache/update-planner/tray.json`).
+  Click on the icon or the popup opens the planner; the menu offers *Check now* and *Quit*. Needs `pyside6`.
+- `packaging/install-desktop.sh --autostart` now starts the **tray icon** on login (it replaces the old window
+  autostart entry); the tray icon is opened from the application menu as "CachyOS Update Planner (Tray)" too.
+
 ## 1.3.4 – 2026-11-21
 
 - **Security:** *Mark as reviewed* in the AUR scanner is now bound to a SHA-256 of the reviewed `PKGBUILD`/`.install`.

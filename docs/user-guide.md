@@ -185,6 +185,17 @@ The dry run shows what would happen without changing anything: it lists the repo
 (honouring held packages), clones and scans AUR packages and checks their dependencies, and lists the Flatpak
 updates, lists orphaned packages and runs `paccache` in dry-run mode. No `sudo` command is run.
 
+## Tray icon
+
+`update-planner-tray` runs in the system tray (KDE: StatusNotifier) without the planner window. It checks repo and
+Flatpak updates after login (first after 30 s), then every 60 minutes (`--interval MINUTES`) and whenever
+`/var/log/pacman.log` changes. Pending updates appear as a badge on the icon and in the tooltip; when updates are
+new since the last notification a popup lists them (the AUR is not checked in the tray). Clicking the icon or the
+popup opens the planner window; the menu has *Check now* and *Quit*. Only one tray process runs per user.
+
+Start it on login with `packaging/install-desktop.sh --autostart`; remove the autostart entry with
+`packaging/kde-integration.sh remove`. Requires the `pyside6` package.
+
 ## Languages
 
 The interface follows the system language: `LANGUAGE`, `LC_ALL`, `LC_MESSAGES`, `LANG`, then the KDE setting.
