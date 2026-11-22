@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.5.0 – 2026-11-22
 
 Security review follow-up.
 
@@ -25,6 +25,8 @@ Security review follow-up.
 - CVE detail lookups only swallow network/format errors; programming errors are logged and raised. Remote AUR and
   tracker data are type-checked.
 - Log files no longer collide when two runs start in the same millisecond.
+- **CI:** GitHub Actions runs `ruff check` and the tests on Python 3.12–3.14 for every push and pull request, with a
+  coverage gate (88 %) on the security-critical modules.
 
 ## 1.4.1 – 2026-11-22
 
