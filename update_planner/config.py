@@ -13,8 +13,9 @@ USER_AGENT = f'update-planner/{__version__} (+https://aur.archlinux.org)'
 HTTP_TIMEOUT = 20.0
 MAX_DOWNLOAD = 8 * 1024 * 1024  # Obergrenze für einzelne Downloads (Tracker ~1 MB)
 # Einzige Hosts, mit denen der Planer spricht (samt Subdomains) – auch Weiterleitungen dürfen sie nicht verlassen:
-# AUR/Security-Tracker/News (archlinux.org), pkgstats (archlinux.de), CachyOS-News, Flathub
-TRUSTED_DOMAINS = ('archlinux.org', 'archlinux.de', 'cachyos.org', 'flathub.org')
+# AUR/Security-Tracker/News/Forum/GitLab (archlinux.org), pkgstats (archlinux.de), CachyOS-News, Flathub,
+# GitHub (Issues der CachyOS-Paket-Repos über api.github.com, Links auf github.com)
+TRUSTED_DOMAINS = ('archlinux.org', 'archlinux.de', 'cachyos.org', 'flathub.org', 'github.com')
 
 CACHE = Path(os.environ.get('XDG_CACHE_HOME', Path.home() / '.cache')) / APP_ID
 CONFIG = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config')) / APP_ID

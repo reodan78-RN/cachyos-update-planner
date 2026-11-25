@@ -108,8 +108,13 @@ halfway, and repo, AUR and Flatpak are separate steps – the snapshot is the wa
 ## Network
 
 - HTTPS only, to `aur.archlinux.org`, `security.archlinux.org`, `archlinux.org`, `cachyos.org`,
-  `pkgstats.archlinux.de` (package popularity for the install page) and `flathub.org` (Flathub search and
-  popular list); package downloads are done by pacman, makepkg and flatpak themselves.
+  `pkgstats.archlinux.de` (package popularity for the install page), `flathub.org` (Flathub search and
+  popular list) and, for known issues, `bbs.archlinux.org`, `gitlab.archlinux.org` and `api.github.com`; package
+  downloads are done by pacman, makepkg and flatpak themselves.
+- **Known issues and privacy:** the Arch forum feed and the CachyOS issue lists are fetched as a whole and matched
+  locally, so they reveal nothing about your system. Arch GitLab is asked once per package base that has an update
+  (at most 60), so GitLab can see which packages are about to be updated – the same kind of information the AUR
+  RPC already gets for AUR packages. Titles are shown as text, links only when they are HTTPS to one of these hosts.
 - Search terms are restricted to `[\w.+-]` (up to five words) before they reach `pacman -Ss`, the AUR RPC or
   Flathub; regex characters of the term are escaped and the words follow a `--`, so a term such as `--version`
   is searched for and never read as a pacman option.

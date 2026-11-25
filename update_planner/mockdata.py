@@ -80,7 +80,21 @@ UPDATES: list[dict] = [
 
 SCANS = scan_all(AUR_META)  # AUR-Scanner-Ergebnisse je Paket (Demo)
 
+# Beispielmeldungen „Bekannte Probleme“ (Demo; echte kommen aus Arch-Forum, CachyOS-GitHub und Arch GitLab)
+ISSUES: dict[str, list[dict]] = {
+    'mesa': [dict(source='Arch-Forum', title='kicad and recent upgrade to mesa 1:25.3.0-1', points=10, solved=False,
+                  exact=True, date='2025-11-20', url='https://bbs.archlinux.org/viewforum.php?id=44')],
+    'kwin': [dict(source='CachyOS', title='[BUG] kwin 6.5.3 panel freezes after resume with VRR enabled', points=15,
+                  solved=False, exact=True, date='2025-11-21', url='https://github.com/CachyOS/CachyOS-PKGBUILDS/issues'),
+             dict(source='Arch-Forum', title='[SOLVED] kwin 6.5.3 crash on login', points=0, solved=True, exact=True,
+                  date='2025-11-19', url='https://bbs.archlinux.org/viewforum.php?id=44')],
+}
+
 for _u in UPDATES:
+    _u['issues'] = ISSUES.get(_u['name'], [])
+    if _u['issues']:
+        _u['reasons'].append((f'Bekannte Probleme ({len(_u["issues"])}): {_u["issues"][0]["title"][:60]}',
+                              min(20, sum(i['points'] for i in _u['issues']))))
     _scan = SCANS.get(_u['name'])
     if _scan and _scan.score:
         _u['reasons'].append((f'AUR-Scan: {_scan.verdict[0]} ({len(_scan.findings)} Befunde)', round(_scan.score * 0.6)))

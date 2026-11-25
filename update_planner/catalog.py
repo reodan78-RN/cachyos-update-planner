@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 
 from . import analysis, aur_scanner, sysutil
 from .i18n import _
-from .sources import aur, discover, flatpak, news, pacman, security, system
+from .sources import aur, discover, flatpak, issues, news, pacman, security, system
 
 log = logging.getLogger(__name__)
 
@@ -256,6 +256,19 @@ async def _collect() -> dict:
     for n in news_items:
         n['new'] = bool(last) and n['date'] >= last[:10]
 
+    reports: list = []
+    if repo_updates or aur_updates:
+        _step(_('Bekannte Probleme prüfen …'))
+        unreachable: list[str] = []
+        bases = [(inst[u.name].base if u.name in inst and inst[u.name].base else u.name) for u in repo_updates]
+        try:
+            reports = await issues.collect(bases, warn=unreachable.append)
+        except Exception as exc:  # noqa: BLE001 – Zusatzinformation, darf den Stand nicht verhindern
+            log.warning('Bekannte Probleme nicht ermittelbar: %s', exc)
+            unreachable.append(type(exc).__name__)
+        if unreachable:
+            _warn(_('Bekannte Probleme unvollständig – nicht erreichbar: {src}', src=', '.join(unreachable)))
+
     aur_meta, scans = {}, {}
     if aur_updates:
         _step(_('{n} AUR-PKGBUILDs scannen …', n=len(aur_updates)))
@@ -270,13 +283,13 @@ async def _collect() -> dict:
 
     _step(_('Bewerten …'))
     data = await asyncio.to_thread(_assemble, inst, repo_updates, fp_items, fp_updates, aur_updates, aur_missing,
-                                   rpc, cves, news_items, aur_meta, scans, sysinfo)
+                                   rpc, cves, news_items, aur_meta, scans, sysinfo, reports)
     data['advisories'] = groups
     return data
 
 
 def _assemble(inst, repo_updates, fp_items, fp_updates, aur_updates, aur_missing, rpc, cves, news_items,
-              aur_meta, scans, sysinfo) -> dict:
+              aur_meta, scans, sysinfo, reports=()) -> dict:
     # --- Pakete mit aufgelösten Abhängigkeiten (provides → Paketname)
     provider: dict[str, str] = {}
     for p in inst.values():
@@ -313,15 +326,22 @@ def _assemble(inst, repo_updates, fp_items, fp_updates, aur_updates, aur_missing
     updates = []
     for u in repo_updates:
         reasons = analysis.repo_risk(u, backups=backups, fixes=fixes, manual_news=manual_news)
+        base = inst[u.name].base if u.name in inst and inst[u.name].base else u.name
+        extra, found = analysis.issue_risk(u.name, base, u.new, u.built or None, reports)
+        reasons += extra
         updates.append(dict(id=u.name, name=u.name, source='repo', old=u.old, new=u.new, size=u.download,
-                            repo=u.repo, reasons=reasons, risk=analysis.score(reasons)))
+                            repo=u.repo, reasons=reasons, risk=analysis.score(reasons), issues=found))
     for u in aur_updates:
         reasons = analysis.aur_risk(aur_meta.get(u['name']) or (aur.meta_from_rpc(rpc[u['name']]) if u['name'] in rpc else None),
                                     scans.get(u['name']))
         if aur.is_vcs(u['name']):
             reasons.append((_('VCS-Paket (Git)'), 5))
+        modified = (rpc.get(u['name']) or {}).get('LastModified')
+        extra, found = analysis.issue_risk(u['name'], u['base'], u['new'],
+                                           float(modified) if isinstance(modified, int | float) else None, reports)
+        reasons += extra
         updates.append(dict(id=u['name'], name=u['name'], source='aur', old=u['old'], new=u['new'], size=0.0,
-                            repo='aur', base=u['base'], reasons=reasons, risk=analysis.score(reasons)))
+                            repo='aur', base=u['base'], reasons=reasons, risk=analysis.score(reasons), issues=found))
     fp_by_id = {f['id'].split('//')[0]: f for f in fp_items}
     for u in fp_updates:
         cur = fp_by_id.get(u['id'])
@@ -330,7 +350,8 @@ def _assemble(inst, repo_updates, fp_items, fp_updates, aur_updates, aur_missing
             reasons.append((_('Runtime – betrifft mehrere Apps'), 8))
         size = _parse_size(u['download'])
         updates.append(dict(id=u['id'], name=u['id'], source='flatpak', old=cur['version'] if cur else '?',
-                            new=u['new'], size=size, repo=u['origin'], reasons=reasons, risk=analysis.score(reasons)))
+                            new=u['new'], size=size, repo=u['origin'], reasons=reasons, risk=analysis.score(reasons),
+                            issues=[]))
 
     conflicts = _conflicts(inst, repo_updates, groups, backups, manual_news, news_items, aur_missing,
                            fp_items, sysinfo, updates)

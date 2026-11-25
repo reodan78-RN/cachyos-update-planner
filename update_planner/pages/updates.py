@@ -23,6 +23,28 @@ SOURCE_SLOT = r'''
 </q-td>
 '''
 
+NAME_SLOT = r'''
+<q-td :props="props">
+  {{ props.value }}
+  <q-icon v-if="props.row.issues && props.row.issues.length" name="report_problem" size="18px"
+          :color="props.row.issues.some(i => i.points > 0) ? 'warning' : 'grey'" class="q-ml-xs cursor-pointer"
+          :aria-label="props.row.issues_label">
+    <q-menu anchor="bottom left" self="top left" max-width="460px">
+      <q-list dense class="q-py-xs">
+        <q-item-label header>{{ props.row.issues_label }}</q-item-label>
+        <q-item v-for="i in props.row.issues" :key="i.url + i.title" tag="a" :href="i.url || undefined"
+                target="_blank" rel="noopener noreferrer" clickable :disable="!i.url">
+          <q-item-section>
+            <q-item-label>{{ i.title }}</q-item-label>
+            <q-item-label caption>{{ i.source }} · {{ i.date }}{{ i.points ? ' · +' + i.points : '' }}{{ i.solved ? ' · ' + props.row.solved_label : '' }}</q-item-label>
+          </q-item-section>
+        </q-item>
+      </q-list>
+    </q-menu>
+  </q-icon>
+</q-td>
+'''
+
 VERSION_SLOT = r'''
 <q-td :props="props">
   <span class="muted">{{ props.row.old }}</span>
@@ -46,7 +68,9 @@ def page() -> None:
         summary = refs['summary']
         if loading_card():
             return
-        rows = [dict(u, color=md.SOURCES[u['source']]['color'], source_label=md.SOURCES[u['source']]['label'])
+        rows = [dict(u, color=md.SOURCES[u['source']]['color'], source_label=md.SOURCES[u['source']]['label'],
+                     issues=u.get('issues') or [], solved_label=_('gelöst'),
+                     issues_label=_('Bekannte Probleme: {n}', n=len(u.get('issues') or [])))
                 for u in s.visible_updates()]
         partial = ui.row().classes('notice w-full items-center gap-2 no-wrap').style('border-left-color:#f8be34')
         with partial:
@@ -72,6 +96,7 @@ def page() -> None:
             ).classes('w-full').props('flat')
             search.bind_value_to(table, 'filter')
             table.add_slot('body-cell-risk', RISK_SLOT)
+            table.add_slot('body-cell-name', NAME_SLOT)
             table.add_slot('body-cell-source', SOURCE_SLOT)
             table.add_slot('body-cell-version', VERSION_SLOT)
             table.selected = [r for r in rows if r['name'] in s.selected]
