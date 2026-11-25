@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.6.0 – 2026-11-25
 
 - **Known issues for pending updates:** reports from the Arch forum (*Pacman & Package Upgrade Issues*), CachyOS'
   package repositories on GitHub and Arch GitLab (`scope::bug`) are matched to pending updates. A warning icon on the
