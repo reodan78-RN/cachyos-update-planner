@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **Known issues for pending updates:** reports from the Arch forum (*Pacman & Package Upgrade Issues*), CachyOS'
+  package repositories on GitHub and Arch GitLab (`scope::bug`) are matched to pending updates. A warning icon on the
+  Updates page lists them with links; the overview shows how many updates are affected. They raise the risk score by
+  up to 20 points (tracker bug +15, forum thread +10, solved 0) – only for reports that name the new version or
+  appeared after it was built. Short or common package names only count when the new version is named.
+- `api.github.com`/`github.com` added to the trusted hosts (CachyOS issue lists).
+
 ## 1.5.0 – 2026-11-22
 
 Security review follow-up.

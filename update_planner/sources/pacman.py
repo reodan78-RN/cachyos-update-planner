@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 from .. import config
@@ -36,6 +37,15 @@ class RepoUpdate:
     download: float = 0.0           # MiB
     depends: list[str] = field(default_factory=list)
     provides: list[str] = field(default_factory=list)
+    built: float = 0.0              # Baudatum der neuen Version (Unix-Zeit), 0 = unbekannt
+
+
+def build_time(text: str) -> float:
+    """„Build Date“ aus `pacman -Si` (C-Locale, Ortszeit) → Unix-Zeit; 0 bei unlesbarem Datum."""
+    try:
+        return datetime.strptime(text.strip(), '%a %b %d %H:%M:%S %Y').timestamp()
+    except ValueError:
+        return 0.0
 
 
 def _split(v: str) -> list[str]:
@@ -154,6 +164,7 @@ def _enrich(updates: list[RepoUpdate]) -> None:
             u.download = _mib(block.get('Download Size', '0'))
             u.depends = _list(block.get('Depends On', ''))
             u.provides = _list(block.get('Provides', ''))
+            u.built = build_time(block.get('Build Date', ''))
 
 
 def parse_info(text: str) -> list[dict[str, str]]:

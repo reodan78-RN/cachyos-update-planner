@@ -9,6 +9,15 @@ from ..dialogs import start_update
 from ..i18n import _
 from ..theme import panel, single_value
 
+ISSUE_CELL = r'''
+<q-td :props="props">
+  {{ props.value }}
+  <q-icon v-if="props.row.issues" name="report_problem" size="16px" :color="props.row.issues_color" class="q-ml-xs">
+    <q-tooltip class="text-body2" style="white-space: pre-line">{{ props.row.issues }}</q-tooltip>
+  </q-icon>
+</q-td>
+'''
+
 RISK_CELL = r'''
 <q-td :props="props">
   <span class="cell-num" :style="{background: props.value >= 60 ? '#dc4e41' : props.value >= 45 ? '#f1813f'
@@ -77,9 +86,11 @@ def page() -> None:
         closed = sum(1 for c in cves if c['status'] == 'behoben durch Update')
         days = _days_since(md.SYSTEM.get('last_upgrade'))
         mib = sum(u['size'] for u in updates)
+        affected = [u for u in updates if u.get('issues')]
+        weighted = [u for u in affected if any(i['points'] for i in u['issues'])]
 
         # ---------- Single Values ----------
-        with ui.grid().classes('w-full gap-3 grid-cols-2 md:grid-cols-3 xl:grid-cols-5'):
+        with ui.grid().classes('w-full gap-3 grid-cols-2 md:grid-cols-3 xl:grid-cols-6'):
             single_value(_('Installierte Pakete'), len(pkgs), None,
                          ', '.join(f'{md.SOURCES[k]["label"]} {sum(1 for p in pkgs if p["source"] == k)}'
                                    for k in md.SOURCES if any(p['source'] == k for p in pkgs)))
@@ -91,6 +102,10 @@ def page() -> None:
                          theme.RED if severe else theme.YELLOW if cves else theme.GREEN,
                          _('{n} davon hoch oder kritisch', n=severe),
                          _('{n} davon mit Update geschlossen', n=closed), theme.GREEN if closed else None)
+            single_value(_('Bekannte Probleme'), len(affected),
+                         theme.ORANGE if weighted else theme.YELLOW if affected else theme.GREEN,
+                         _('{n} Updates mit Meldungen', n=len(affected)) if affected else _('keine Meldungen'),
+                         _('{n} davon im Risk Score', n=len(weighted)) if affected else None)
             single_value(_('Tage seit Systemupdate'), days if days is not None else '–',
                          theme.GREEN if days is not None and days < 7 else theme.YELLOW if days is not None and days < 21
                          else theme.RED, (md.SYSTEM.get('last_upgrade') or '')[:10])
@@ -132,7 +147,9 @@ def page() -> None:
         with ui.grid().classes('w-full gap-3 grid-cols-1 xl:grid-cols-3'):
             with panel(_('Riskanteste Updates'), _('Top 10 nach Risk Score'), classes='xl:col-span-2'):
                 rows = [dict(id=u['name'], name=u['name'], src=md.SOURCES[u['source']]['label'],
-                             version=f'{u["old"]} → {u["new"]}', risk=u['risk'])
+                             version=f'{u["old"]} → {u["new"]}', risk=u['risk'],
+                             issues='\n'.join(f'{i["source"]}: {i["title"]}' for i in u.get('issues') or []),
+                             issues_color='warning' if any(i['points'] for i in u.get('issues') or []) else 'grey')
                         for u in sorted(updates, key=lambda u: -u['risk'])[:10]]
                 if not rows:
                     ui.label(_('System ist aktuell.')).classes('py-2')
@@ -144,6 +161,7 @@ def page() -> None:
                         {'name': 'risk', 'label': _('Risiko'), 'field': 'risk', 'align': 'right'},
                     ]).classes('w-full').props('flat dense hide-pagination :rows-per-page-options="[0]"')
                     table.add_slot('body-cell-risk', RISK_CELL)
+                    table.add_slot('body-cell-name', ISSUE_CELL)
                     ui.link(_('Alle Updates anzeigen'), '/updates').classes('mt-1')
             with panel(_('System')):
                 info = md.SYSTEM

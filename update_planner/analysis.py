@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from collections import defaultdict
 
 from . import config
@@ -165,6 +166,79 @@ def aur_risk(meta: dict | None, scan) -> list[tuple[str, int]]:
     if scan and scan.score:
         reasons.append((_('AUR-Scan: {verdict} ({n} Befunde)', verdict=_(scan.verdict[0]), n=len(scan.findings)), round(scan.score * 0.6)))
     return reasons
+
+
+# ------------------------------------------------------------------ Bekannte Probleme
+
+ISSUE_CAP = 20                 # alle Meldungen zusammen höchstens so viele Punkte (Arch-News-Eingriff: 25)
+ISSUE_TRACKER, ISSUE_FORUM = 15, 10
+RECENT_DAYS = 21               # ohne Baudatum: so alt darf eine Meldung höchstens sein
+# Namen, die auch als gewöhnliches Wort oder Thema vorkommen – nur mit direkt folgender Versionsnummer zählen
+GENERIC = frozenset({'linux', 'python', 'pacman', 'which', 'make', 'git', 'sudo', 'wayland', 'file', 'less', 'time',
+                     'patch', 'bash', 'tar', 'gzip', 'acl', 'attr', 'zsh', 'fish', 'update', 'kernel', 'firmware',
+                     'base', 'core', 'grub', 'mesa-utils', 'perl', 'ruby', 'node', 'rust', 'go', 'java', 'qt', 'gtk'})
+
+
+def _upstream(version: str) -> str:
+    """'1:26.3.1-1' → '26.3.1' (ohne Epoch und pkgrel)."""
+    v = version.split(':', 1)[-1]
+    return v.rsplit('-', 1)[0] if '-' in v else v
+
+
+def generic(name: str) -> bool:
+    """Kurze oder allgemeine Namen (gcc, linux, python, wayland …) kommen in Titeln oft in anderem Sinn vor."""
+    return len(name) < 4 or name in GENERIC
+
+
+def mentions(title: str, name: str) -> bool:
+    """Nennt der Titel das Paket – als eigenes Wort, nicht als Teil eines längeren Namens (mesa ≠ mesa-utils)?
+    Kurze oder allgemeine Namen zählen nur mit direkt folgender Versionsnummer („linux 7.3.5“)."""
+    pat = rf'(?<![\w.+@/-]){re.escape(name)}(?![\w+@-]|\.\w)'
+    if generic(name):
+        pat += r'[\s:]*v?\d'
+    return re.search(pat, title, re.IGNORECASE) is not None
+
+
+def mentions_version(title: str, version: str) -> bool:
+    """Nennt der Titel genau diese Version (mit oder ohne Epoch/pkgrel)? '26.3.1' passt nicht auf '26.3.10'.
+    Bei Snapshot-Versionen wie '16.2.1+r501+g4c5507b' zählt auch der Release-Teil davor ('16.2.1')."""
+    up = _upstream(version)
+    forms = {up, up.split('+', 1)[0]} - {''}
+    return any(re.search(rf'(?<![\w.]){re.escape(f)}(?![\d])', title) for f in forms)
+
+
+def issue_risk(name: str, base: str, new: str, released: float | None, reports, now: float | None = None
+               ) -> tuple[list[tuple[str, int]], list[dict]]:
+    """(Gründe für den Risk Score, zugeordnete Meldungen mit Link) für ein Update.
+
+    Eine Meldung gehört zum Update, wenn sie das Paket nennt (Arch GitLab: wenn sie zu dessen pkgbase gehört) und
+    entweder die neue Version nennt oder seit dem Bau der neuen Version entstand bzw. aktiv war. Punkte: Fehler-
+    Tracker 15, Forum 10, als gelöst markiert 0 – zusammen höchstens ISSUE_CAP, damit eine Fehlzuordnung ein Update
+    nicht allein aus der Standardauswahl drängt. Kurze/allgemeine Namen zählen nur, wenn genau die neue Version
+    genannt wird („GCC 7.3 kernels“ ist kein gcc-16-Problem)."""
+    now = time.time() if now is None else now
+    found = []
+    for r in reports:
+        exact = mentions_version(r.title, new)
+        if r.package:
+            hit = r.package == base
+        else:
+            hit = any(mentions(r.title, n) and (exact or not generic(n)) for n in {name, base})
+        if not hit:
+            continue
+        recent = r.date >= released - 86400 if released else now - r.date <= RECENT_DAYS * 86400
+        if not (exact or recent):
+            continue
+        points = 0 if r.solved else ISSUE_TRACKER if r.tracker else ISSUE_FORUM
+        found.append(dict(source=r.source, title=r.title, url=r.url, points=points, solved=r.solved, exact=exact,
+                          date=time.strftime('%Y-%m-%d', time.localtime(r.date)) if r.date else ''))
+    found.sort(key=lambda f: f['date'], reverse=True)               # neueste zuerst …
+    found.sort(key=lambda f: (-f['points'], not f['exact']))        # … innerhalb gleicher Gewichtung
+    reasons = []
+    if found:
+        total = min(ISSUE_CAP, sum(f['points'] for f in found))
+        reasons.append((_('Bekannte Probleme ({n}): {title}', n=len(found), title=found[0]['title'][:60]), total))
+    return reasons, found
 
 
 def score(reasons: list[tuple[str, int]]) -> int:

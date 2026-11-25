@@ -166,6 +166,8 @@ def test_https_client_refuses_redirect_to_http():
     ('https://aur.archlinux.org/rpc', True), ('https://security.archlinux.org/x.json', True),
     ('https://archlinux.org/feeds/news/', True), ('https://pkgstats.archlinux.de/api', True),
     ('https://cachyos.org/rss.xml', True), ('https://flathub.org/api/v2/search', True),
+    ('https://api.github.com/repos/CachyOS/linux-cachyos/issues', True), ('https://bbs.archlinux.org/x', True),
+    ('https://gitlab.archlinux.org/api/v4/projects', True), ('https://github.com.evil.example/', False),
     ('http://aur.archlinux.org/rpc', False), ('https://evil-archlinux.org/', False),
     ('https://archlinux.org.evil.example/', False), ('https://example.org/', False),
 ])

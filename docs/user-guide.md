@@ -19,8 +19,10 @@ ready. *Check for updates* reloads everything.
 ## Overview
 
 - **Single values:** installed packages, pending updates with download size, the highest risk score, known
-  vulnerabilities in installed packages (how many are high or critical, and how many an update closes) and the
-  time since the last full system update. Each value is colored by threshold.
+  vulnerabilities in installed packages (how many are high or critical, and how many an update closes), **known
+  issues** (how many pending updates have problem reports, and how many of those count towards the risk score) and the
+  time since the last full system update. Each value is colored by threshold. In *Riskiest updates*, a warning icon
+  next to a package means there are reports; point at it to see them.
 - **Package changes per day:** upgraded, installed and removed packages over the last 60 days, read from
   `/var/log/pacman.log`.
 - **Risk of pending updates:** how many updates are low, medium or high risk.
@@ -83,7 +85,8 @@ selection stays, so you can install for real right away; after a real installati
 ## Updates
 
 All pending updates with old → new version, size and risk score. Point at the colored risk value to see how the score
-was calculated. Select and deselect updates with the checkboxes or the presets *Low risk only*,
+was calculated. A warning icon next to the package name means there are **known issues**: click it for the list of
+reports, each with its source, date, points and a link to the thread or issue. Select and deselect updates with the checkboxes or the presets *Low risk only*,
 *Security updates* and *All*.
 
 Deselected **repo** packages are held back with `pacman --ignore`. Arch does not support partial upgrades, so the
@@ -98,12 +101,26 @@ page warns you, and packages that only work together are held back as a group.
 | Reboot required | +10 |
 | Locally modified configuration file → `.pacnew` expected | +8 |
 | Recent news with manual intervention mentions the package | +25 |
+| Known issues: bug report in a tracker / forum thread / marked solved (all together at most +20) | +15 / +10 / 0 |
 | Fixes a known vulnerability | −10 each |
 | AUR: built from source / orphaned / flagged out of date / VCS package | +10 / +15 / +5 / +5 |
 | AUR scanner score | +60 % of the scan score |
 | Flatpak app / Flatpak runtime | +3 / +11 |
 
 Every update starts at 5; the result is capped to 0–100. 0–29 is low, 30–59 medium, 60+ high.
+
+### Known issues
+
+Reports come from three places: the Arch forum's *Pacman & Package Upgrade Issues* board (last 50 threads), open
+GitHub issues of CachyOS' package repositories (`CachyOS-PKGBUILDS`, `linux-cachyos`; version requests and feature
+wishes are skipped) and Arch GitLab issues labelled `scope::bug` for the packages that have an update (at most 60).
+
+A report belongs to an update when it names the package (Arch GitLab: when it was filed for that package) **and**
+either names the new version or was filed or active after the new version was built. Short or common package
+names (`gcc`, `linux`, `python`, `wayland`, …) only count when the title names exactly the new version. A report is not a confirmed
+bug and many problems only affect certain hardware, so reports add at most 20 points – less than a news item that
+requires manual intervention, and never enough to push an update out of the default selection on its own. If a
+source cannot be reached, the overview says so.
 
 ## Conflicts
 

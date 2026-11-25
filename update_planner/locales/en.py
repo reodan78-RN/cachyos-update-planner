@@ -603,4 +603,14 @@ MESSAGES: dict[str, str] = {
     'mehrdeutige Paketdateien für {pkg}': 'ambiguous package files for {pkg}',
     'unerwartete Ausgabe von pacman -T': 'unexpected output from pacman -T',
     'ungültige Abhängigkeit im PKGBUILD: {dep}': 'invalid dependency in PKGBUILD: {dep}',
+    # ------------------------------------------------------------------ known issues 1.6.0
+    'Bekannte Probleme': 'Known issues',
+    'Bekannte Probleme ({n}): {title}': 'Known issues ({n}): {title}',
+    'Bekannte Probleme prüfen …': 'Checking known issues …',
+    'Bekannte Probleme unvollständig – nicht erreichbar: {src}': 'Known issues incomplete – unreachable: {src}',
+    'Bekannte Probleme: {n}': 'Known issues: {n}',
+    'gelöst': 'solved',
+    'keine Meldungen': 'no reports',
+    '{n} Updates mit Meldungen': '{n} updates with reports',
+    '{n} davon im Risk Score': '{n} of them in the risk score',
 }
