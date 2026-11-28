@@ -204,14 +204,25 @@ updates, lists orphaned packages and runs `paccache` in dry-run mode. No `sudo` 
 
 ## Tray icon
 
-`update-planner-tray` runs in the system tray (KDE: StatusNotifier) without the planner window. It checks repo and
-Flatpak updates after login (first after 30 s), then every 60 minutes (`--interval MINUTES`) and whenever
+`update-planner-tray` runs in the system tray (KDE: StatusNotifier) without the planner window. It checks repo,
+AUR and Flatpak updates after login (first after 30 s), then every 60 minutes (`--interval MINUTES`) and whenever
 `/var/log/pacman.log` changes. Pending updates appear as a badge on the icon and in the tooltip; when updates are
-new since the last notification a popup lists them (the AUR is not checked in the tray). Clicking the icon or the
-popup opens the planner window; the menu has *Check now* and *Quit*. Only one tray process runs per user.
+new since the last notification a popup lists them. Clicking the icon or the
+popup opens the planner window; the menu has *Open*, *Check now* and *Quit*. Only one tray process runs per user.
 
 Start it on login with `packaging/install-desktop.sh --autostart`; remove the autostart entry with
 `packaging/kde-integration.sh remove`. Requires the `pyside6` package.
+
+## Plasma widget
+
+The installer also adds a KDE Plasma 6 widget. Right-click the desktop or panel, choose *Add or Manage Widgets*,
+search for **Update Planner** and drag it where you want it. The icon carries the number of pending updates; a
+click opens the list (repo, AUR, Flatpak) with *Check now* and *Open planner*.
+
+The widget asks `update-planner-tray --status` every two minutes. That returns the saved result and only checks
+again when it is older than 60 minutes, pacman has changed something since, or you press *Check now*. It does not
+send popups – use the tray icon for those. Both can run side by side. It needs the `plasma5support` package
+(part of a normal Plasma installation).
 
 ## Languages
 

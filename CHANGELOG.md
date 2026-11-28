@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **Plasma widget:** the planner is also available as a KDE Plasma 6 widget for the panel or the desktop
+  (*Add or Manage Widgets* → *Update Planner*). It shows the number of pending updates as a badge, lists them per
+  source, checks again on request and opens the planner. `install-desktop.sh` installs and removes it.
+- `update-planner-tray --status [--force]` prints the current state as JSON; tray icon and widget share the last
+  result and never check at the same time.
+
 ## 1.6.0 – 2026-11-25
 
 - **Known issues for pending updates:** reports from the Arch forum (*Pacman & Package Upgrade Issues*), CachyOS'

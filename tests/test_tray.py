@@ -1,6 +1,10 @@
 import json
+import os
+from pathlib import Path
 
-from update_planner import tray
+import pytest
+
+from update_planner import __version__, tray
 
 
 def test_signature_and_news():
@@ -74,7 +78,6 @@ def test_menu_keeps_all_actions(monkeypatch):
     """Regression: QActions ohne Parent wurden abgeräumt – 'Öffnen' und 'Beenden' fehlten im Menü."""
     import gc
 
-    import pytest
     pytest.importorskip('PySide6')
     monkeypatch.setenv('QT_QPA_PLATFORM', 'offscreen')
     from PySide6.QtWidgets import QApplication, QSystemTrayIcon
@@ -101,3 +104,60 @@ def test_menu_keeps_all_actions(monkeypatch):
     assert tray._('Update Planner öffnen') in texts
     assert tray._('Jetzt prüfen') in texts
     assert tray._('Beenden') in texts
+
+
+@pytest.fixture
+def status_env(monkeypatch, tmp_path):
+    """Prüfstand, Sperre und pacman.log liegen im Testverzeichnis; gezählt werden die echten Abfragen."""
+    monkeypatch.setattr(tray.config, 'ensure_dirs', lambda: None)
+    monkeypatch.setattr(tray.config, 'CHECKUP_DB', tmp_path / 'checkup-db')
+    monkeypatch.setattr(tray, 'STATUS_FILE', tmp_path / 'status.json')
+    monkeypatch.setattr(tray, 'CHECK_LOCK', tmp_path / 'check.lock')
+    monkeypatch.setattr(tray, 'PACMAN_LOG', tmp_path / 'pacman.log')
+    calls = []
+    monkeypatch.setattr(tray, 'repo_updates', lambda: calls.append(1) or [('linux', '7.0-1')])
+    monkeypatch.setattr(tray, 'aur_updates', lambda: [])
+    monkeypatch.setattr(tray, 'flatpak_updates', lambda: [])
+    return calls
+
+
+def test_status_uses_cache_until_stale_or_forced(status_env, tmp_path):
+    first = tray.status(3600)
+    assert first['repo'] == [('linux', '7.0-1')] and first['checked'] > 0 and 'error' not in first
+    assert tray.status(3600) == first and len(status_env) == 1
+    assert oct(tray.STATUS_FILE.stat().st_mode & 0o777) == '0o600'
+    tray.status(3600, force=True)
+    assert len(status_env) == 2
+    tray.PACMAN_LOG.write_text('installed')                   # pacman hat seit der Prüfung etwas getan
+    later = tray.load_status()['checked'] + 5
+    os.utime(tray.PACMAN_LOG, (later, later))
+    tray.status(3600)
+    assert len(status_env) == 3
+
+
+def test_status_keeps_old_state_when_check_fails(status_env, monkeypatch):
+    old = tray.status(3600)
+
+    def offline():
+        raise OSError('offline')
+    monkeypatch.setattr(tray, 'repo_updates', offline)
+    failed = tray.status(3600, force=True)
+    assert failed['error'] == 'offline' and failed['repo'] == old['repo'] and failed['checked'] == old['checked']
+    tray.STATUS_FILE.write_text('kaputt')
+    assert tray.status(3600) == {'checked': 0.0, 'repo': [], 'aur': [], 'flatpak': [], 'error': 'offline'}
+
+
+def test_status_command_prints_json_without_tray_lock(status_env, monkeypatch, capsys):
+    monkeypatch.setattr(tray.sys, 'argv', ['update-planner-tray', '--status', '--lang', 'de'])
+    monkeypatch.setattr(tray.os, 'geteuid', lambda: 1000)
+    monkeypatch.setattr(tray, 'lock_instance', lambda: pytest.fail('--status braucht keine Einzelinstanz'))
+    tray.main()
+    assert json.loads(capsys.readouterr().out)['repo'] == [['linux', '7.0-1']]
+
+
+def test_plasmoid_metadata_matches_release():
+    root = Path(__file__).parent.parent
+    meta = json.loads((root / 'plasmoid' / 'metadata.json').read_text())
+    assert meta['KPlugin']['Version'] == __version__
+    assert meta['KPlugin']['Id'] in (root / 'packaging' / 'install-desktop.sh').read_text()
+    assert (root / 'plasmoid' / 'contents' / 'ui' / 'main.qml').is_file()
