@@ -44,7 +44,9 @@ all three sources (sorted by popularity, with security hints) and **schedule** a
 - **Hardened local server** – the web interface listens on `127.0.0.1` only and refuses foreign `Host`/`Origin`
   headers and connections from other users; all downloads are HTTPS-only (see [Security](docs/security.md))
 - **Tray icon** – `update-planner-tray` starts on login (`install-desktop.sh --autostart`), shows the number of
-  pending repo/Flatpak updates as a badge, announces new ones in a popup and opens the planner on click (needs `pyside6`)
+  pending repo/AUR/Flatpak updates as a badge, announces new ones in a popup and opens the planner on click (needs `pyside6`)
+- **Plasma widget** – the same count for the panel or desktop (*Add or Manage Widgets* → *Update Planner*), with the
+  list of updates, *Check now* and *Open planner* ([details](docs/user-guide.md#plasma-widget))
 - **Desktop app** – own window (NiceGUI + GTK/WebKit), light and dark theme, KDE menu entry and icon
 - **Language** – follows the system language (German or English; other languages fall back to English)
 

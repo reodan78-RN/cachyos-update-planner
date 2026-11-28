@@ -40,6 +40,14 @@ commands as root. This document describes how that is contained.
   and `flatpak remote-ls --updates`. It never uses `sudo` and has no network server; the planner window is started
   as a separate process on click. State: `~/.cache/update-planner/tray.json` (mode `0600`, names and versions only).
 
+## Plasma widget
+
+- The widget runs inside `plasmashell` and executes three fixed commands: `update-planner-tray --status`, the same
+  with `--force`, and `kstart --application update-planner`. Nothing from the network or from package data is ever
+  put into a command line, and package names and versions are displayed as plain text only.
+- `--status` only reads, exactly like the tray process. Its result is saved in
+  `~/.cache/update-planner/status.json` (mode `0600`).
+
 ## Scheduled updates
 
 - A schedule stores the time, the dialog options, the *deselected* and the deliberately added updates, the source
@@ -155,6 +163,7 @@ halfway, and repo, AUR and Flatpak are separate steps – the snapshot is the wa
 | `~/.config/update-planner/secret` | session secret | `0600` |
 | `~/.config/update-planner/schedule.json` | scheduled update (time and options, no password) | `0600` |
 | `~/.cache/update-planner/logs/update-*.log` | log of every update run (no password) | `0600` |
+| `~/.cache/update-planner/status.json` | last check of tray icon and widget (names and versions) | `0600` |
 | `~/.cache/update-planner/checkup-db` | private copy of the pacman sync database | user |
 | `~/.cache/update-planner/aur/` | AUR build directories | `0700` |
 | `~/.cache/update-planner/http/` | cached HTTPS responses | `0700` |

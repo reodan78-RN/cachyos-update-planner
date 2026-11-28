@@ -1,0 +1,13 @@
+{
+    "KPlugin": {
+        "Id": "io.github.reodan78rn.updateplanner",
+        "Name": "Update Planner",
+        "Description": "Shows pending updates (repo, AUR, Flatpak) and opens the CachyOS Update Planner",
+        "Description[de]": "Zeigt anstehende Updates (Repo, AUR, Flatpak) und öffnet den CachyOS Update Planner",
+        "Icon": "update-planner",
+        "Category": "System Information",
+        "Version": "1.6.0"
+    },
+    "KPackageStructure": "Plasma/Applet",
+    "X-Plasma-API-Minimum-Version": "6.0"
+}

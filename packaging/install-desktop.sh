@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Installs the CachyOS Update Planner as a KDE mini program for the current user (no root needed).
+# Installs the CachyOS Update Planner and its Plasma widget for the current user (no root needed).
 #
 #   packaging/install-desktop.sh                     install / update
 #   packaging/install-desktop.sh --autostart         also start the tray icon on login
@@ -14,6 +14,7 @@ APPS="$DATA/applications"
 HICOLOR="$DATA/icons/hicolor"
 SIZES=(16 24 32 48 64 128 256 512)
 BIN="$HOME/.local/bin"
+PLASMOID_ID="io.github.reodan78rn.updateplanner"
 
 # Messages follow the system language (German or English)
 msg() { local l="${LANGUAGE:-${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}}"; [[ "$l" == de* ]] && echo "$1" || echo "$2"; }
@@ -37,6 +38,7 @@ remove_icons() {
 
 if (( remove )); then
     bash "$SRC/packaging/kde-integration.sh" remove || true
+    command -v kpackagetool6 >/dev/null && kpackagetool6 -t Plasma/Applet -r "$PLASMOID_ID" >/dev/null 2>&1 || true
     rm -rf "$APPDIR"
     rm -f "$BIN/update-planner" "$BIN/update-planner-tray" "$APPS/update-planner.desktop" "$APPS/update-planner-tray.desktop"
     remove_icons
@@ -83,6 +85,23 @@ command -v kbuildsycoca6 >/dev/null && kbuildsycoca6 >/dev/null 2>&1 || true
 args=(install)
 (( autostart )) && args+=(--autostart)
 bash "$SRC/packaging/kde-integration.sh" "${args[@]}"   # also removes the window rule from 1.0.0
+
+# ---- Plasma widget ("Add or Manage Widgets" → Update Planner); optional, so a failure only warns
+if command -v kpackagetool6 >/dev/null && pacman -Q plasma5support >/dev/null 2>&1; then
+    action=--install
+    [[ -d "$DATA/plasma/plasmoids/$PLASMOID_ID" ]] && action=--upgrade
+    if kpackagetool6 -t Plasma/Applet "$action" "$SRC/plasmoid" >/dev/null; then
+        if [[ $action == --upgrade ]]; then
+            msg "→ Miniprogramm aktualisiert (sichtbar nach erneutem Anmelden)" "→ Widget updated (visible after logging in again)"
+        else
+            msg "→ Miniprogramm installiert: Miniprogramme hinzufügen → Update Planner" "→ Widget installed: Add Widgets → Update Planner"
+        fi
+    else
+        msg "Hinweis: Miniprogramm konnte nicht installiert werden" "Note: the widget could not be installed"
+    fi
+else
+    msg "Hinweis: Miniprogramm übersprungen (braucht KDE Plasma 6 mit plasma5support)" "Note: widget skipped (needs KDE Plasma 6 with plasma5support)"
+fi
 
 # ---- Self-test
 "$VENV/bin/update-planner" --version >/dev/null

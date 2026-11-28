@@ -18,6 +18,8 @@ The window behaves like any other program: it opens on the **virtual desktop you
 | `flatpak` | Flatpak updates | optional |
 | `snapper`, `snap-pac` | Btrfs snapshots before updates | recommended |
 | `ttf-fira-sans` | the dashboard typeface (Noto Sans is used otherwise) | recommended |
+| `pyside6` | tray icon | optional |
+| `plasma5support`, `kpackage` | Plasma widget (part of a normal Plasma 6 installation) | optional |
 
 ```bash
 sudo pacman -S --needed pacman-contrib expac git python-gobject webkit2gtk-4.1 base-devel
@@ -42,7 +44,8 @@ The script
 4. installs the icon in eight sizes into `~/.local/share/icons/hicolor/` and refreshes the icon cache,
 5. adds the launcher `update-planner.desktop` to the application menu (category *System*),
 6. removes the desktop-2 window rule that version 1.0.0 installed, if present,
-7. runs a self-test.
+7. installs or updates the Plasma widget (skipped with a note without Plasma 6),
+8. runs a self-test.
 
 | Command | Effect |
 |---|---|
@@ -53,6 +56,10 @@ The script
 Running the installer again updates the installation in place.
 
 Messages of the installer follow the system language (German or English).
+
+To add the widget, right-click the desktop or panel → *Add or Manage Widgets* → **Update Planner**
+(see the [user guide](user-guide.md#plasma-widget)). After an update of the widget, log out and back in so that
+Plasma loads the new version.
 
 ## 3. Starting
 
@@ -84,7 +91,7 @@ Disable it by deleting that file or under **System Settings → Autostart**.
 ```bash
 git pull                                 # get the new version
 packaging/install-desktop.sh             # update the installation
-packaging/install-desktop.sh --remove    # remove program, menu entry, icon and autostart
+packaging/install-desktop.sh --remove    # remove program, widget, menu entry, icon and autostart
 ```
 
 Removing keeps logs (`~/.cache/update-planner/logs`) and settings (`~/.config/update-planner`).

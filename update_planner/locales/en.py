@@ -581,6 +581,8 @@ MESSAGES: dict[str, str] = {
     'SEKUNDEN': 'SECONDS',
     'Wartezeit bis zur ersten Prüfung (Standard: {n})': 'wait before the first check (default: {n})',
     'Das Tray-Symbol läuft bereits.': 'The tray icon is already running.',
+    'Stand als JSON ausgeben und beenden': 'print the state as JSON and exit',
+    'mit --status: sofort neu prüfen': 'with --status: check again now',
     'AUR: {n}': 'AUR: {n}',
     # ------------------------------------------------------------------ hardening 1.5.0
     '!! Zeitlimit überschritten ({s} s): {cmd}': '!! Time limit exceeded ({s} s): {cmd}',

@@ -1,5 +1,7 @@
 """Tray-Symbol: prüft im Hintergrund auf Updates, meldet neue per Popup und öffnet den Planer.
 
+`--status` gibt denselben Stand als JSON aus – daraus liest das Plasma-Miniprogramm (`plasmoid/`).
+
 Eigener, schlanker Prozess (`update-planner-tray`, ohne NiceGUI/WebKit). Die Logik (Prüfen, Zusammenfassen,
 Merken bereits gemeldeter Updates) ist von der Qt-Oberfläche getrennt und ohne Qt testbar.
 """
@@ -17,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from . import __version__, config, i18n
@@ -29,6 +32,9 @@ log = logging.getLogger('update_planner.tray')
 TRAY_DB = config.CACHE / 'tray-db'          # eigene Kopie, damit sie sich nicht mit der Prüfung im Fenster beißt
 STATE_FILE = config.CACHE / 'tray.json'     # welche Updates schon gemeldet wurden
 LOCK_FILE = config.CACHE / 'tray.lock'
+STATUS_FILE = config.CACHE / 'status.json'  # letzter Prüfstand, gemeinsam für Tray und Miniprogramm
+CHECK_LOCK = config.CACHE / 'check.lock'    # nie zwei Prüfungen gleichzeitig auf derselben DB
+SOURCES = ('repo', 'aur', 'flatpak')
 ICON = Path(__file__).parent / 'static' / 'icon.png'
 DEFAULT_INTERVAL = 60                       # Minuten
 FIRST_CHECK_DELAY = 30                      # Sekunden nach dem Login: Netzwerk ist dann meist da
@@ -80,10 +86,68 @@ def aur_updates() -> list[tuple[str, str]]:
     return [(u['name'], u['new']) for u in found]
 
 
+@contextmanager
+def check_lock():
+    """Wartet, bis keine andere Prüfung (Tray oder Miniprogramm) mehr läuft."""
+    config.ensure_dirs()
+    with open(CHECK_LOCK, 'w') as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        yield
+
+
+def _query() -> dict[str, list[tuple[str, str]]]:
+    found = {'repo': repo_updates(), 'aur': aur_updates(), 'flatpak': flatpak_updates()}
+    _write_json(STATUS_FILE, {'checked': time.time(), **found})
+    return found
+
+
 def check() -> dict[str, list[tuple[str, str]]]:
     """Fragt Repo, AUR und Flatpak ab – dieselben Quellen wie der Planer. Fällt `checkupdates` aus, wird die
     Ausnahme weitergereicht (Stand beibehalten)."""
-    return {'repo': repo_updates(), 'aur': aur_updates(), 'flatpak': flatpak_updates()}
+    with check_lock():
+        return _query()
+
+
+def load_status(path: Path | None = None) -> dict | None:
+    """Zuletzt gespeicherter Prüfstand oder None, wenn er fehlt oder unbrauchbar ist."""
+    try:
+        data = json.loads((path or STATUS_FILE).read_text())
+        return {'checked': float(data['checked']),
+                **{src: [(str(name), str(ver)) for name, ver in data[src]] for src in SOURCES}}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def is_stale(checked: float, max_age: float) -> bool:
+    """Älter als `max_age` Sekunden, oder seitdem wurde installiert bzw. vom Planer neu synchronisiert."""
+    now = time.time()
+    if checked > now or now - checked > max_age:
+        return True
+    for path in (PACMAN_LOG, config.CHECKUP_DB / 'sync'):
+        try:
+            if path.stat().st_mtime > checked:
+                return True
+        except OSError:
+            pass
+    return False
+
+
+def status(max_age: float, force: bool = False) -> dict:
+    """Prüfstand für das Miniprogramm: aus dem Zwischenspeicher, solange er aktuell ist, sonst neu geprüft.
+    Schlägt die Prüfung fehl, bleibt der alte Stand stehen und `error` nennt den Grund."""
+    asked = time.time()
+    with check_lock():
+        cached = load_status()
+        # `checked > asked`: während des Wartens auf die Sperre hat gerade jemand anderes geprüft
+        if cached and (cached['checked'] > asked or not (force or is_stale(cached['checked'], max_age))):
+            return cached
+        try:
+            _query()
+        except Exception as exc:  # noqa: BLE001 – Netz/Sperre: Stand beibehalten, Grund anzeigen
+            log.warning('Prüfung fehlgeschlagen: %s', exc)
+            empty = {'checked': 0.0, **{src: [] for src in SOURCES}}
+            return (cached or empty) | {'error': str(exc)[:200]}
+        return load_status() or {'checked': 0.0, **{src: [] for src in SOURCES}, 'error': str(STATUS_FILE)}
 
 
 def signature(found: dict[str, list[tuple[str, str]]]) -> set[str]:
@@ -121,16 +185,21 @@ def load_notified(path: Path = STATE_FILE) -> set[str]:
         return set()
 
 
-def save_notified(sig: set[str], path: Path = STATE_FILE) -> None:
+def _write_json(path: Path, data: dict) -> None:
+    """Atomar und nur für den Benutzer lesbar schreiben; ein Fehler wird nur protokolliert."""
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix('.tmp')
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, 'w') as f:
-            json.dump({'notified': sorted(sig)}, f)
+            json.dump(data, f)
         tmp.replace(path)
     except OSError as exc:
         log.warning('Zustand nicht gespeichert: %s', exc)
+
+
+def save_notified(sig: set[str], path: Path = STATE_FILE) -> None:
+    _write_json(path, {'notified': sorted(sig)})
 
 
 def news(current: set[str], notified: set[str]) -> set[str]:
@@ -333,6 +402,8 @@ def main() -> None:
                         help=_('Prüfintervall in Minuten (Standard: {n})', n=DEFAULT_INTERVAL))
     parser.add_argument('--delay', type=int, default=FIRST_CHECK_DELAY, metavar=_('SEKUNDEN'),
                         help=_('Wartezeit bis zur ersten Prüfung (Standard: {n})', n=FIRST_CHECK_DELAY))
+    parser.add_argument('--status', action='store_true', help=_('Stand als JSON ausgeben und beenden'))
+    parser.add_argument('--force', action='store_true', help=_('mit --status: sofort neu prüfen'))
     parser.add_argument('--lang', choices=i18n.SUPPORTED, help=_('Sprache erzwingen (Standard: Systemsprache)'))
     parser.add_argument('--version', action='version', version=f'%(prog)s {__version__}')
     parser.add_argument('-v', '--verbose', action='store_true', help=_('ausführliches Protokoll'))
@@ -342,6 +413,9 @@ def main() -> None:
                         format='%(asctime)s %(levelname)s %(name)s: %(message)s')
     if os.geteuid() == 0:
         sys.exit(_('update-planner darf nicht als root gestartet werden (sudo wird bei Bedarf abgefragt).'))
+    if args.status:                                   # ohne Qt und neben einem laufenden Tray-Symbol möglich
+        print(json.dumps(status(max(5, args.interval) * 60, force=args.force)))
+        return
     lock = lock_instance()
     if lock is None:
         sys.exit(_('Das Tray-Symbol läuft bereits.'))
