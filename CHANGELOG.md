@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.6.1 – 2026-11-28
 
 - **Plasma widget:** the planner is also available as a KDE Plasma 6 widget for the panel or the desktop
   (*Add or Manage Widgets* → *Update Planner*). It shows the number of pending updates as a badge, lists them per
